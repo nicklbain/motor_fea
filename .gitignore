@@ -1,0 +1,11 @@
+# Python caches and build outputs
+__pycache__/
+*.py[cod]
+
+# Binary data artifacts
+*.npz
+*.npy
+
+# Local debug assets
+bokeh_debug*.html
+fontlist-*.json
