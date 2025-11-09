@@ -28,6 +28,11 @@ const canvasState = {
 };
 const canvasPadding = 30;
 let drawScheduled = false;
+const BUILDER_EVENT_PREFIX = 'casebuilder:';
+
+function emitBuilderEvent(name, detail = {}) {
+  window.dispatchEvent(new CustomEvent(`${BUILDER_EVENT_PREFIX}${name}`, { detail }));
+}
 
 function deepCopy(value) {
   return JSON.parse(JSON.stringify(value));
@@ -48,6 +53,7 @@ function init() {
     setActiveTool('select');
     renderAll();
   }
+  emitBuilderEvent('ready', { caseName: state.caseName || null, cases: [...state.cases] });
 }
 
 function cacheElements() {
@@ -236,6 +242,7 @@ function newCase(name) {
   renderAll();
   setActiveTool('select');
   setStatus(`Started new case '${name}'.`, 'info');
+  emitBuilderEvent('caseLoaded', { caseName: state.caseName, isNew: true });
 }
 
 async function loadCase(caseName) {
@@ -256,9 +263,14 @@ async function loadCase(caseName) {
     renderAll();
     setActiveTool('select');
     setStatus(`Loaded ${state.caseName}`, 'info');
+    emitBuilderEvent('caseLoaded', { caseName: state.caseName });
   } catch (err) {
     console.error(err);
     setStatus(`Failed to load case: ${err}`, 'error');
+    emitBuilderEvent('caseLoadFailed', {
+      caseName,
+      error: err?.message || String(err),
+    });
   }
 }
 
@@ -696,6 +708,20 @@ function setStatus(message, variant = 'info') {
   elements.statusLine.dataset.variant = variant;
 }
 
+function ensureCaseTracked(caseName) {
+  if (!caseName) {
+    return false;
+  }
+  const alreadyPresent = state.cases.includes(caseName);
+  if (!alreadyPresent) {
+    state.cases.push(caseName);
+    state.cases.sort();
+    renderCaseSelect();
+    emitBuilderEvent('casesChanged', { cases: [...state.cases] });
+  }
+  return !alreadyPresent;
+}
+
 function serializeDefinition() {
   const defaults = Object.fromEntries(
     Object.entries(MATERIAL_DEFAULTS).map(([key, meta]) => [key, deepCopy(meta.params)])
@@ -734,12 +760,12 @@ async function saveCaseDefinition() {
     state.caseName = data.case;
     state.definitionName = definition.name;
     state.dirty = false;
-    if (!state.cases.includes(state.caseName)) {
-      state.cases.push(state.caseName);
-      state.cases.sort();
+    const added = ensureCaseTracked(state.caseName);
+    if (!added) {
       renderCaseSelect();
     }
     setStatus(`Saved to ${data.path}`, 'success');
+    emitBuilderEvent('definitionSaved', { caseName: state.caseName, path: data.path });
   } catch (err) {
     console.error(err);
     setStatus(`Save failed: ${err}`, 'error');
@@ -771,6 +797,7 @@ async function runCasePipeline() {
   const definition = serializeDefinition();
   setRunButtonBusy(true);
   setStatus('Saving case and running pipeline...', 'info');
+  emitBuilderEvent('runStarted', { caseName, definition });
   try {
     const response = await fetch(`/api/case/${encodeURIComponent(caseName)}/run`, {
       method: 'POST',
@@ -796,16 +823,25 @@ async function runCasePipeline() {
     state.caseName = data.case || caseName;
     state.definitionName = definition.name;
     state.dirty = false;
-    if (!state.cases.includes(state.caseName)) {
-      state.cases.push(state.caseName);
-      state.cases.sort();
+    const added = ensureCaseTracked(state.caseName);
+    if (!added) {
       renderCaseSelect();
     }
     const summary = summarizeSteps(data.steps);
     setStatus(summary ? `Run complete (${summary}).` : 'Run complete.', 'success');
+    emitBuilderEvent('runCompleted', {
+      caseName: state.caseName,
+      succeeded: true,
+      steps: data.steps || [],
+    });
   } catch (err) {
     console.error(err);
     setStatus(`Run failed: ${err.message || err}`, 'error');
+    emitBuilderEvent('runCompleted', {
+      caseName: state.caseName || caseName,
+      succeeded: false,
+      error: err.message || String(err),
+    });
   } finally {
     setRunButtonBusy(false);
   }
@@ -823,3 +859,19 @@ function downloadDefinition() {
 }
 
 window.addEventListener('DOMContentLoaded', init);
+
+const CaseBuilderAPI = {
+  getCaseName: () => state.caseName || null,
+  getCases: () => [...state.cases],
+  loadCase,
+  newCase,
+  serializeDefinition,
+  on(event, handler) {
+    window.addEventListener(`${BUILDER_EVENT_PREFIX}${event}`, handler);
+  },
+  off(event, handler) {
+    window.removeEventListener(`${BUILDER_EVENT_PREFIX}${event}`, handler);
+  },
+};
+
+window.CaseBuilderAPI = CaseBuilderAPI;

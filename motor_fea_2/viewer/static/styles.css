@@ -183,3 +183,21 @@ button:hover {
   margin: 0;
   color: #333;
 }
+
+#cell-info-content {
+  font-size: 0.9rem;
+}
+
+#cell-info-content dl {
+  margin: 0;
+}
+
+#cell-info-content dt {
+  font-weight: 600;
+  margin-top: 0.4rem;
+}
+
+#cell-info-content dd {
+  margin: 0;
+  color: #333;
+}

@@ -31,6 +31,10 @@ python3 solve_B.py --case demo_case
 # 5) Launch the viewer (optional, in another shell)
 python3 viewer/app.py --debug
 # Visit http://127.0.0.1:5000 and pick cases/demo_case/mesh.npz (or Az/B files) from the dropdown.
+
+# 6) (New) Launch the combined workbench UI
+python3 workbench/app.py --debug
+# Visit http://127.0.0.1:5173 to build, solve, and visualize in one place.
 ```
 
 ---
@@ -137,3 +141,5 @@ Each saved definition looks like:
 ```
 
 Fields that overlap get applied in list order, so later shapes win. Rectangles benefit from exact area clipping, while circles use barycentric sampling (good for grids ≥ ~50×50). The point-and-click UI is intentionally simple now but the JSON schema is human-readable, versionable, and forward-compatible with future features (DXF import, arcs, etc.).
+
+

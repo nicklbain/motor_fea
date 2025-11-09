@@ -3,6 +3,7 @@ const ctx = canvas.getContext("2d");
 const overlay = document.getElementById("overlay-message");
 const statusBar = document.getElementById("status-bar");
 const summaryContent = document.getElementById("summary-content");
+const cellInfoContent = document.getElementById("cell-info-content");
 const caseSelect = document.getElementById("case-select");
 const refreshBtn = document.getElementById("refresh-cases");
 const resetBtn = document.getElementById("reset-view");
@@ -45,7 +46,15 @@ const state = {
   dragging: false,
   dragPointerId: null,
   lastPointer: { x: 0, y: 0 },
+  dragMoved: false,
+  selectedCellIndex: null,
 };
+
+const VIEWER_EVENT_PREFIX = "meshviewer:";
+
+function emitViewerEvent(name, detail = {}) {
+  window.dispatchEvent(new CustomEvent(`${VIEWER_EVENT_PREFIX}${name}`, { detail }));
+}
 
 const REGION_COLORS = {
   0: "#f7fbff", // air
@@ -56,6 +65,8 @@ const WIRE_COLOR = "#b87333";
 const EDGE_COLOR = "#000";
 const MAG_ARROW_COLOR = "#c2185b";
 const B_VECTOR_COLOR = "#005cb2";
+const SELECTED_CELL_STROKE = "#ff4081";
+const SELECTED_CELL_FILL = "rgba(255, 64, 129, 0.2)";
 const TARGET_MAGNET_COLOR = "#c56b1a";
 const TARGET_STEEL_COLOR = "#4b5563";
 const TARGET_WIRE_COLOR = "#a62019";
@@ -94,6 +105,10 @@ async function init() {
   } else {
     showOverlay("No mesh cases found. Run mesh_and_sources.py first.");
   }
+  emitViewerEvent("ready", {
+    caseName: state.caseName || initialCase || null,
+    cases: currentCaseOptions(),
+  });
 }
 
 function setCaseOptions(cases, preferred) {
@@ -124,6 +139,27 @@ function setCaseOptions(cases, preferred) {
   }
 }
 
+function currentCaseOptions() {
+  if (!caseSelect) {
+    return [];
+  }
+  return Array.from(caseSelect.options)
+    .map((option) => option.value)
+    .filter((value) => value);
+}
+
+function setCaseSelection(caseName) {
+  if (!caseSelect) {
+    return false;
+  }
+  const match = Array.from(caseSelect.options).find((option) => option.value === caseName);
+  if (match) {
+    caseSelect.value = caseName;
+    return true;
+  }
+  return false;
+}
+
 async function refreshCaseList(andNotify = true) {
   try {
     const response = await fetch("/api/cases");
@@ -131,18 +167,29 @@ async function refreshCaseList(andNotify = true) {
       throw new Error("Failed to fetch case list");
     }
     const data = await response.json();
-    setCaseOptions(data.cases || [], data.default);
+    const caseList = data.cases || [];
+    setCaseOptions(caseList, data.default);
     if (andNotify) {
-      updateStatus(`Found ${data.cases.length} case(s).`);
+      updateStatus(`Found ${caseList.length} case(s).`);
     }
+    emitViewerEvent("casesChanged", {
+      cases: caseList,
+      defaultCase: data.default || null,
+    });
+    return data;
   } catch (error) {
     updateStatus(`Error fetching case list: ${error.message}`);
+    emitViewerEvent("casesChanged", {
+      cases: currentCaseOptions(),
+      error: error.message,
+    });
+    return null;
   }
 }
 
 async function loadMesh(caseName) {
   if (!caseName) {
-    return;
+    return null;
   }
   showOverlay("Loading mesh…");
   updateStatus(`Loading ${caseName}…`);
@@ -165,8 +212,10 @@ async function loadMesh(caseName) {
     state.caseName = caseName;
     state.edges = buildEdges(mesh.tris || []);
     state.centroids = computeCentroids(mesh.nodes || [], mesh.tris || []);
+    state.selectedCellIndex = null;
     fitViewToBounds(mesh.bounds);
     updateSummary(mesh);
+    updateCellInfo(null);
     syncLayerAvailability();
     showOverlay("");
     updateStatus(
@@ -175,9 +224,18 @@ async function loadMesh(caseName) {
       } tris.`
     );
     render();
+    emitViewerEvent("caseLoaded", {
+      caseName,
+      summary: mesh.summary || null,
+      bounds: mesh.bounds || null,
+    });
+    return mesh;
   } catch (error) {
+    const message = error?.message || String(error);
     showOverlay("Failed to load mesh.");
-    updateStatus(`Error: ${error.message}`);
+    updateStatus(`Error: ${message}`);
+    emitViewerEvent("caseLoadFailed", { caseName, error: message });
+    return null;
   }
 }
 
@@ -278,6 +336,7 @@ function render() {
   drawTargetGeometry();
   drawMagnetization();
   drawBFieldVectors();
+  drawSelectedCellOutline();
 }
 
 function updateSummary(mesh) {
@@ -305,6 +364,86 @@ function updateSummary(mesh) {
         ${formatRange("J_z", stats.Jz) || "J_z: n/a"}<br/>
         ${formatRange("|B|", stats.Bmag) || "|B|: n/a"}
       </dd>
+    </dl>
+  `;
+}
+
+function updateCellInfo(cellIndex) {
+  if (!cellInfoContent) {
+    return;
+  }
+  if (!state.mesh) {
+    cellInfoContent.textContent = "Load a mesh to inspect cells.";
+    return;
+  }
+  if (cellIndex === null || cellIndex === undefined || cellIndex < 0) {
+    cellInfoContent.textContent = "Click a cell to inspect local fields.";
+    return;
+  }
+  const nodes = state.mesh.nodes || [];
+  const tris = state.mesh.tris || [];
+  if (!tris[cellIndex]) {
+    cellInfoContent.textContent = "Select a valid cell.";
+    return;
+  }
+  const centroid = state.centroids[cellIndex] || [NaN, NaN];
+  const regionId = Array.isArray(state.mesh.region_id)
+    ? state.mesh.region_id[cellIndex]
+    : null;
+
+  const bx = valueAt(state.bField?.Bx, cellIndex);
+  const by = valueAt(state.bField?.By, cellIndex);
+  let bMag = valueAt(state.bField?.Bmag, cellIndex);
+  if (!Number.isFinite(bMag) && Number.isFinite(bx) && Number.isFinite(by)) {
+    bMag = Math.hypot(bx, by);
+  }
+  const directionDeg =
+    Number.isFinite(bx) && Number.isFinite(by) && (Math.abs(bx) > 0 || Math.abs(by) > 0)
+      ? ((Math.atan2(by, bx) * 180) / Math.PI).toFixed(1)
+      : null;
+
+  const muR = valueAt(state.mesh?.fields?.mu_r, cellIndex);
+  const mx = valueAt(state.mesh?.fields?.Mx, cellIndex);
+  const my = valueAt(state.mesh?.fields?.My, cellIndex);
+  const mMag =
+    Number.isFinite(mx) && Number.isFinite(my) ? Math.hypot(mx, my) : null;
+  const jz = valueAt(state.mesh?.fields?.Jz, cellIndex);
+
+  const materialLines = [];
+  if (Number.isFinite(muR)) materialLines.push(`μ_r = ${formatNumber(muR)}`);
+  if (Number.isFinite(mMag)) materialLines.push(`|M| = ${formatNumber(mMag)} A/m`);
+  if (Number.isFinite(mx) || Number.isFinite(my)) {
+    materialLines.push(
+      `Mx = ${formatNumber(mx)}, My = ${formatNumber(my)} A/m`
+    );
+  }
+  const fieldLines = [];
+  if (Number.isFinite(bMag)) fieldLines.push(`|B| = ${formatNumber(bMag)} T`);
+  if (Number.isFinite(bx) || Number.isFinite(by)) {
+    fieldLines.push(`Bx = ${formatNumber(bx)} T, By = ${formatNumber(by)} T`);
+  }
+  if (directionDeg !== null) {
+    fieldLines.push(`Dir = ${directionDeg}°`);
+  }
+  const jLines = [];
+  if (Number.isFinite(jz)) {
+    jLines.push(`${formatNumber(jz)} A/m²`);
+  }
+
+  cellInfoContent.innerHTML = `
+    <dl>
+      <dt>Cell</dt>
+      <dd>#${cellIndex} (region ${regionId ?? "n/a"})</dd>
+      <dt>Centroid</dt>
+      <dd>x = ${formatNumber(centroid[0])} m<br/>y = ${formatNumber(
+        centroid[1]
+      )} m</dd>
+      <dt>B field</dt>
+      <dd>${fieldLines.join("<br/>") || "n/a"}</dd>
+      <dt>Material</dt>
+      <dd>${materialLines.join("<br/>") || "n/a"}</dd>
+      <dt>J<sub>z</sub></dt>
+      <dd>${jLines.join("<br/>") || "n/a"}</dd>
     </dl>
   `;
 }
@@ -366,6 +505,7 @@ function prepareBField(rawField) {
   const enriched = { ...rawField };
   const values = Array.isArray(rawField.Bmag) ? rawField.Bmag : null;
   enriched.logExtent = values ? computeLogExtent(values) : null;
+  enriched.percentileBmag = values ? computePercentile(values, 99) : null;
   return enriched;
 }
 
@@ -504,6 +644,33 @@ function computeLogExtent(values) {
     maxLog = minLog + 1;
   }
   return { minLog, maxLog, range: maxLog - minLog };
+}
+
+function computePercentile(values, percentile) {
+  if (!Array.isArray(values) || values.length === 0) {
+    return null;
+  }
+  const cleaned = [];
+  for (const raw of values) {
+    const value = Number(raw);
+    if (Number.isFinite(value)) {
+      cleaned.push(value);
+    }
+  }
+  if (cleaned.length === 0) {
+    return null;
+  }
+  cleaned.sort((a, b) => a - b);
+  const t = clamp(percentile, 0, 100) / 100;
+  const maxIndex = cleaned.length - 1;
+  const index = t * maxIndex;
+  const lower = Math.floor(index);
+  const upper = Math.min(maxIndex, Math.ceil(index));
+  const weight = index - lower;
+  if (lower === upper || weight <= 0) {
+    return cleaned[lower];
+  }
+  return cleaned[lower] * (1 - weight) + cleaned[upper] * weight;
 }
 
 function drawMaterials() {
@@ -720,12 +887,17 @@ function drawBFieldMagnitude() {
     return;
   }
   const stats = state.mesh?.summary?.field_stats?.Bmag;
-  const minVal = stats?.min ?? 0;
-  const maxVal = stats?.max ?? minVal;
-  const range = Math.max(maxVal - minVal, 1e-12);
+  const statsMin = stats?.min ?? 0;
+  const statsMax = stats?.max ?? statsMin;
+  const statsRange = Math.max(statsMax - statsMin, 1e-12);
+  const linearMin = 0;
+  const linearCap = Math.max(state.bField.percentileBmag ?? statsMax ?? 0, 1e-12);
+  const linearRange = Math.max(linearCap - linearMin, 1e-12);
   const mode =
     state.bMagnitudeScale === "log" && state.bField.logExtent ? "log" : "linear";
   const logExtent = state.bField.logExtent;
+  const scaleMinVal = mode === "log" ? statsMin : linearMin;
+  const scaleRange = mode === "log" ? statsRange : linearRange;
 
   ctx.save();
   ctx.globalAlpha = state.layers.materials ? 0.65 : 0.9;
@@ -743,7 +915,7 @@ function drawBFieldMagnitude() {
     ctx.lineTo(B.x, B.y);
     ctx.lineTo(C.x, C.y);
     ctx.closePath();
-    ctx.fillStyle = bMagnitudeColor(Bmag[i] || 0, minVal, range, mode, logExtent);
+    ctx.fillStyle = bMagnitudeColor(Bmag[i] || 0, scaleMinVal, scaleRange, mode, logExtent);
     ctx.fill();
   }
   ctx.restore();
@@ -792,6 +964,39 @@ function drawBFieldVectors() {
     drawArrowHead(end, start);
   }
 
+  ctx.restore();
+}
+
+function drawSelectedCellOutline() {
+  const index = state.selectedCellIndex;
+  if (index === null || index === undefined || index < 0) {
+    return;
+  }
+  const tri = state.mesh?.tris?.[index];
+  const nodes = state.mesh?.nodes;
+  if (!tri || !nodes) {
+    return;
+  }
+  const pa = nodes[tri[0]];
+  const pb = nodes[tri[1]];
+  const pc = nodes[tri[2]];
+  if (!pa || !pb || !pc) {
+    return;
+  }
+  const A = worldToScreen(pa[0], pa[1]);
+  const B = worldToScreen(pb[0], pb[1]);
+  const C = worldToScreen(pc[0], pc[1]);
+  ctx.save();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = SELECTED_CELL_STROKE;
+  ctx.fillStyle = SELECTED_CELL_FILL;
+  ctx.beginPath();
+  ctx.moveTo(A.x, A.y);
+  ctx.lineTo(B.x, B.y);
+  ctx.lineTo(C.x, C.y);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
   ctx.restore();
 }
 
@@ -886,6 +1091,7 @@ function lerpColor(a, b, t) {
 caseSelect.addEventListener("change", () => {
   const value = caseSelect.value;
   if (value) {
+    emitViewerEvent("caseSelected", { caseName: value });
     loadMesh(value);
   }
 });
@@ -951,6 +1157,7 @@ canvas.addEventListener("pointerdown", (event) => {
   state.dragging = true;
   state.dragPointerId = event.pointerId;
   state.lastPointer = { x: event.clientX, y: event.clientY };
+  state.dragMoved = false;
   canvas.setPointerCapture(event.pointerId);
 });
 
@@ -960,6 +1167,9 @@ canvas.addEventListener("pointermove", (event) => {
   }
   const dx = event.clientX - state.lastPointer.x;
   const dy = event.clientY - state.lastPointer.y;
+  if (!state.dragMoved && Math.hypot(dx, dy) > 3) {
+    state.dragMoved = true;
+  }
   state.view.offsetX += dx;
   state.view.offsetY += dy;
   state.lastPointer = { x: event.clientX, y: event.clientY };
@@ -971,6 +1181,9 @@ function endDrag(event) {
     state.dragging = false;
     state.dragPointerId = null;
     canvas.releasePointerCapture(event.pointerId);
+    if (!state.dragMoved && event.button === 0) {
+      handleCanvasClick(event);
+    }
   }
 }
 
@@ -1007,4 +1220,107 @@ function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
 
+function handleCanvasClick(event) {
+  if (!state.mesh) {
+    return;
+  }
+  const px =
+    typeof event.offsetX === "number"
+      ? event.offsetX
+      : event.clientX - canvas.getBoundingClientRect().left;
+  const py =
+    typeof event.offsetY === "number"
+      ? event.offsetY
+      : event.clientY - canvas.getBoundingClientRect().top;
+  const world = screenToWorld(px, py);
+  const triIndex = findTriangleAt(world.x, world.y);
+  state.selectedCellIndex = triIndex;
+  if (triIndex === null) {
+    updateStatus("No cell under cursor.");
+    updateCellInfo(null);
+  } else {
+    updateStatus(`Selected cell #${triIndex}.`);
+    updateCellInfo(triIndex);
+  }
+  render();
+}
+
+function findTriangleAt(x, y) {
+  const tris = state.mesh?.tris;
+  const nodes = state.mesh?.nodes;
+  if (!Array.isArray(tris) || !Array.isArray(nodes)) {
+    return null;
+  }
+  for (let i = 0; i < tris.length; i += 1) {
+    const tri = tris[i];
+    const pa = nodes[tri[0]];
+    const pb = nodes[tri[1]];
+    const pc = nodes[tri[2]];
+    if (!pa || !pb || !pc) continue;
+    if (pointInTriangle(x, y, pa, pb, pc)) {
+      return i;
+    }
+  }
+  return null;
+}
+
+function pointInTriangle(px, py, a, b, c) {
+  const v0x = c[0] - a[0];
+  const v0y = c[1] - a[1];
+  const v1x = b[0] - a[0];
+  const v1y = b[1] - a[1];
+  const v2x = px - a[0];
+  const v2y = py - a[1];
+
+  const dot00 = v0x * v0x + v0y * v0y;
+  const dot01 = v0x * v1x + v0y * v1y;
+  const dot02 = v0x * v2x + v0y * v2y;
+  const dot11 = v1x * v1x + v1y * v1y;
+  const dot12 = v1x * v2x + v1y * v2y;
+  const denom = dot00 * dot11 - dot01 * dot01;
+  if (Math.abs(denom) < 1e-18) {
+    return false;
+  }
+  const invDenom = 1 / denom;
+  const u = (dot11 * dot02 - dot01 * dot12) * invDenom;
+  const v = (dot00 * dot12 - dot01 * dot02) * invDenom;
+  return u >= -1e-6 && v >= -1e-6 && u + v <= 1 + 1e-6;
+}
+
+function valueAt(arr, index) {
+  if (!Array.isArray(arr) || index < 0 || index >= arr.length) {
+    return null;
+  }
+  const value = Number(arr[index]);
+  return Number.isFinite(value) ? value : null;
+}
+
+function formatNumber(value, digits = 3) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) {
+    return "n/a";
+  }
+  return num.toFixed(digits);
+}
+
 init();
+
+const MeshViewerAPI = {
+  getCaseName: () => state.caseName || null,
+  getCases: () => [...currentCaseOptions()],
+  loadCase(caseName, options = {}) {
+    if (!caseName) {
+      return Promise.resolve(null);
+    }
+    if (options.syncSelection !== false) {
+      setCaseSelection(caseName);
+    }
+    return loadMesh(caseName);
+  },
+  refreshCases({ notify = true } = {}) {
+    return refreshCaseList(notify);
+  },
+  setCaseSelection,
+};
+
+window.MeshViewerAPI = MeshViewerAPI;
