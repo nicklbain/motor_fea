@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-magnetostatics_solver.py
-------------------------
+magnetostatics_solver_iron.py
+-----------------------------
 Vector-potential magnetostatics demo on a 2-D grid (node-based Az).
 - Unknowns: Az at nodes
 - Materials: nu (=1/mu) per cell
-- Magnetization: uniform rectangular region defined in physical space;
-  it is stamped as sheet currents on the cell edges enclosing the region.
+- Permanent magnets: uniform rectangular regions defined in physical space;
+  they are stamped as sheet currents on the cell edges enclosing the region.
+- Soft iron: high-permeability regions without impressed magnetisation.
 
 The domain is defined via total x/y extents and a target grid spacing so you
 can easily adjust the discretisation without touching cell counts directly.
 
-Usage: python3 magnetostatics_solver.py
+Usage: python3 magnetostatics_solver_iron.py
 """
 
 import numpy as np
@@ -34,9 +35,9 @@ ENABLE_PLOTTING = False  # toggle to skip figure rendering when profiling perfor
 # -----------------------------
 # Problem setup
 # -----------------------------
-Lx_total = 0.2      # [m] total width of the modelled window
-Ly_total = 0.10      # [m] total height of the modelled window
-grid_size = 0.0002     # [m] nominal square cell edge length (dx = dy here)
+Lx_total = 0.4      # [m] total width of the modelled window
+Ly_total = 0.25      # [m] total height of the modelled window
+grid_size = 0.0005     # [m] nominal square cell edge length (dx = dy here)
 
 # Round the domain to an integer number of cells based on the requested spacing.
 Nx = max(1, int(np.ceil(Lx_total / grid_size)))
@@ -61,15 +62,20 @@ nu_air = 1.0 / mu0
 mu_r_magnet = 1.05
 nu_magnet = 1.0 / (mu0 * mu_r_magnet)
 
+mu_r_iron = 2000.0
+nu_iron = 1.0 / (mu0 * mu_r_iron)
+
 # Magnet definitions in physical coordinates (lower-left corner + size)
 Br = 2.0  # Tesla
-M_default = np.array([0.0, Br / mu0, 0.0])  # +y
+M_default = np.array([Br/mu0, 0.0, 0.0])  # +x
 
-magnet_1_origin = (0.08, 0.05)   # [m] (x0, y0)
+magnet_1_origin = (0.16, 0.12)   # [m] (x0, y0)
 magnet_1_size = (0.01, 0.01)     # [m] (width_x, height_y)
 
+# Keep the second magnet definition available for quick comparisons, but it is
+# disabled in this variant because we replace it with a soft-iron block.
 include_second_magnet = True
-magnet_2_origin = (0.1, 0.05)   # [m] (x0, y0)
+magnet_2_origin = (0.2, 0.12)   # [m] (x0, y0)
 magnet_2_size = (0.01, 0.01)     # [m] (width_x, height_y)
 
 magnet_configs = [
@@ -88,6 +94,23 @@ if include_second_magnet:
             "origin": magnet_2_origin,
             "size": magnet_2_size,
             "magnetization": M_default,
+        }
+    )
+
+# Soft-iron body (no impressed magnetisation; responds via high permeability)
+include_iron_body = False
+iron_origin = magnet_2_origin
+iron_size = magnet_2_size
+
+iron_configs = []
+if include_iron_body:
+    iron_configs.append(
+        {
+            "name": "Soft iron block",
+            "origin": iron_origin,
+            "size": iron_size,
+            "mu_r": mu_r_iron,
+            "nu": nu_iron,
         }
     )
 
@@ -261,6 +284,38 @@ for magnet in magnet_configs:
 
 if not np.any(combined_magnet_mask):
     raise ValueError("Magnet definitions do not cover any cells; adjust configuration.")
+
+combined_iron_mask = np.zeros((Nx, Ny), dtype=bool) if iron_configs else None
+
+for iron in iron_configs:
+    x0, y0 = iron["origin"]
+    ix, iy = iron["size"]
+    x1 = x0 + ix
+    y1 = y0 + iy
+
+    mask = (Xc >= x0) & (Xc <= x1) & (Yc >= y0) & (Yc <= y1)
+    if not np.any(mask):
+        raise ValueError(
+            f"{iron['name']} definition does not cover any cells; "
+            "adjust origin/size or grid_size."
+        )
+
+    iron_i_idx, iron_j_idx = np.where(mask)
+    iron["mask"] = mask
+    iron["cell_indices"] = (iron_i_idx, iron_j_idx)
+    iron["extent_grid"] = (
+        iron_i_idx.min() * dx,
+        (iron_i_idx.max() + 1) * dx,
+        iron_j_idx.min() * dy,
+        (iron_j_idx.max() + 1) * dy,
+    )
+
+    nu_cell[mask] = iron["nu"]
+    if combined_iron_mask is not None:
+        combined_iron_mask |= mask
+
+if combined_iron_mask is not None and not np.any(combined_iron_mask):
+    raise ValueError("Soft-iron definitions do not cover any cells; adjust configuration.")
 
 # Allocate K and b
 if sp is not None:
@@ -537,6 +592,17 @@ if ENABLE_PLOTTING:
     axs[1,2].text(0.05, 0.74, "Magnets:\n" + "\n".join(magnet_info_lines), va="top")
     axs[1,2].text(0.05, 0.32, "mu_r(magnet) = {:.2f}".format(mu_r_magnet))
     axs[1,2].text(0.05, 0.24, "M = {:.3e} A/m (along +y)".format(M_default[1]))
+    if iron_configs:
+        iron_info_lines = []
+        for iron in iron_configs:
+            ix, iy = iron["size"]
+            x0, y0 = iron["origin"]
+            iron_info_lines.append(
+                "{} origin (m): ({:.3f}, {:.3f})\n   size (m): ({:.3f}, {:.3f})\n   mu_r: {:.1f}".format(
+                    iron["name"], x0, y0, ix, iy, iron["mu_r"]
+                )
+            )
+        axs[1,2].text(0.05, 0.12, "Iron regions:\n" + "\n".join(iron_info_lines), va="top")
 
     plt.tight_layout()
     plt.show()
@@ -575,3 +641,34 @@ for magnet in magnet_configs:
             By[j_mid, i_mid],
             B_sample,
         )
+
+if iron_configs:
+    for iron in iron_configs:
+        extent = iron["extent_grid"]
+        try:
+            Fx_i, Fy_i, tau_i = compute_mst_force_torque(Bx, By, dx, dy, extent)
+            print(
+                "  {} MST force: Fx={:.4e} N/m  Fy={:.4e} N/m  tau_z={:.4e} N·m/m".format(
+                    iron["name"], Fx_i, Fy_i, tau_i
+                )
+            )
+        except ValueError as exc:
+            print(f"  {iron['name']} MST skipped: {exc}")
+        print(
+            "{} grid-aligned extent: x=[{:.3f}, {:.3f}] m, y=[{:.3f}, {:.3f}] m, mu_r = {:.1f}".format(
+                iron["name"], extent[0], extent[1], extent[2], extent[3], iron["mu_r"]
+            )
+        )
+
+        iron_i_idx, iron_j_idx = iron["cell_indices"]
+        if iron_i_idx.size:
+            mid_idx = iron_i_idx.size // 2
+            i_mid = iron_i_idx[mid_idx]
+            j_mid = iron_j_idx[mid_idx]
+            B_sample = np.sqrt(Bx[j_mid, i_mid]**2 + By[j_mid, i_mid]**2)
+            print(
+                "  Representative iron cell (Bx, By, |B|):",
+                Bx[j_mid, i_mid],
+                By[j_mid, i_mid],
+                B_sample,
+            )

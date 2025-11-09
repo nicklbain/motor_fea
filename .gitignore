@@ -6,6 +6,12 @@ __pycache__/
 *.npz
 *.npy
 
+# Virtual environments
+.venv/
+
 # Local debug assets
 bokeh_debug*.html
 fontlist-*.json
+
+# Large simulation data
+cases/
