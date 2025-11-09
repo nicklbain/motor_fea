@@ -373,23 +373,110 @@ function extractDesignShapes(meta) {
   if (!meta || typeof meta !== "object") {
     return [];
   }
+
+  const caseDefObjects = meta.case_definition?.objects;
+  if (Array.isArray(caseDefObjects) && caseDefObjects.length) {
+    return caseDefObjects.map((obj) => normalizeDesignShape(obj)).filter(Boolean);
+  }
+
   const geometry = meta.geometry;
-  if (!geometry || typeof geometry !== "object") {
-    return [];
+  if (Array.isArray(geometry) && geometry.length) {
+    return geometry.map((obj) => normalizeDesignShape(obj)).filter(Boolean);
   }
-  const shapes = [];
-  if (geometry.magnet_rect) {
-    shapes.push({ ...geometry.magnet_rect, role: "magnet" });
+
+  if (geometry && typeof geometry === "object") {
+    const shapes = [];
+    if (geometry.magnet_rect) {
+      const norm = normalizeDesignShape(geometry.magnet_rect, "magnet");
+      if (norm) shapes.push(norm);
+    }
+    if (geometry.steel_rect) {
+      const norm = normalizeDesignShape(geometry.steel_rect, "steel");
+      if (norm) shapes.push(norm);
+    }
+    if (Array.isArray(geometry.wire_disks)) {
+      geometry.wire_disks.forEach((disk) => {
+        const norm = normalizeDesignShape(disk, "wire");
+        if (norm) shapes.push(norm);
+      });
+    }
+    return shapes;
   }
-  if (geometry.steel_rect) {
-    shapes.push({ ...geometry.steel_rect, role: "steel" });
+  return [];
+}
+
+function normalizeDesignShape(entry, fallbackRole = "magnet") {
+  if (!entry || typeof entry !== "object") {
+    return null;
   }
-  if (Array.isArray(geometry.wire_disks)) {
-    geometry.wire_disks.forEach((disk) => {
-      shapes.push({ ...disk, role: "wire" });
-    });
+  const role = entry.material || entry.role || fallbackRole;
+  const shapeDef = entry.shape && typeof entry.shape === "object" ? entry.shape : entry;
+  const typeRaw = shapeDef.type || entry.type;
+  const type = typeof typeRaw === "string" ? typeRaw.toLowerCase() : "rect";
+  const center = normalizeCenter(shapeDef.center ?? entry.center);
+  if (!center) {
+    return null;
   }
-  return shapes;
+  if (type === "rect") {
+    const width = firstFiniteNumber(
+      shapeDef.width,
+      shapeDef.size && typeof shapeDef.size === "object" ? shapeDef.size.width : null,
+      typeof shapeDef.size === "number" ? shapeDef.size : null
+    );
+    const height = firstFiniteNumber(
+      shapeDef.height,
+      shapeDef.size && typeof shapeDef.size === "object" ? shapeDef.size.height : null,
+      typeof shapeDef.size === "number" ? shapeDef.size : null
+    );
+    if (!(width > 0 && height > 0)) {
+      return null;
+    }
+    return { type: "rect", center, width, height, role };
+  }
+  if (type === "circle") {
+    const radius = firstFiniteNumber(
+      shapeDef.radius,
+      shapeDef.size && typeof shapeDef.size === "object" ? shapeDef.size.radius : null,
+      typeof shapeDef.size === "number" ? shapeDef.size : null,
+      shapeDef.width ? Number(shapeDef.width) / 2 : null,
+      shapeDef.height ? Number(shapeDef.height) / 2 : null
+    );
+    if (!(radius > 0)) {
+      return null;
+    }
+    return { type: "circle", center, radius, role };
+  }
+  return null;
+}
+
+function normalizeCenter(raw) {
+  if (Array.isArray(raw) && raw.length >= 2) {
+    const x = Number(raw[0]);
+    const y = Number(raw[1]);
+    if (Number.isFinite(x) && Number.isFinite(y)) {
+      return [x, y];
+    }
+  } else if (raw && typeof raw === "object") {
+    const x = firstFiniteNumber(raw.x, raw.X, raw.cx, raw.centerX, raw[0]);
+    const y = firstFiniteNumber(raw.y, raw.Y, raw.cy, raw.centerY, raw[1]);
+    if (Number.isFinite(x) && Number.isFinite(y)) {
+      return [x, y];
+    }
+  }
+  return null;
+}
+
+function firstFiniteNumber(...values) {
+  for (const value of values) {
+    if (value === undefined || value === null) {
+      continue;
+    }
+    const num = Number(value);
+    if (Number.isFinite(num)) {
+      return num;
+    }
+  }
+  return null;
 }
 
 function computeLogExtent(values) {

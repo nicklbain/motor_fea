@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Motor FEA Case Builder</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+  <div class="app-shell">
+    <header>
+      <h1>Case Builder</h1>
+      <p>Sketch rectangles or circles, assign materials, and save the definition directly into a case folder.</p>
+    </header>
+    <main>
+      <section class="controls">
+        <div class="panel">
+          <h2>Case</h2>
+          <label>Existing cases
+            <select id="caseSelect"></select>
+          </label>
+          <label>Target case folder
+            <input id="caseNameInput" type="text" placeholder="mag2d_case">
+          </label>
+          <div class="button-row">
+            <button id="loadCaseBtn">Load</button>
+            <button id="newCaseBtn">New</button>
+          </div>
+          <label>Definition label
+            <input id="definitionNameInput" type="text" placeholder="Demo case">
+          </label>
+        </div>
+        <div class="panel">
+          <h2>Grid</h2>
+          <div class="grid-inputs">
+            <label>Nx <input id="gridNx" type="number" min="4" step="1"></label>
+            <label>Ny <input id="gridNy" type="number" min="4" step="1"></label>
+            <label>Lx (m) <input id="gridLx" type="number" min="0.01" step="0.01"></label>
+            <label>Ly (m) <input id="gridLy" type="number" min="0.01" step="0.01"></label>
+          </div>
+        </div>
+        <div class="panel">
+          <h2>Tools</h2>
+          <div class="button-row">
+            <button class="tool-btn" data-tool="select">Select / Move</button>
+            <button class="tool-btn" data-tool="rect">Draw Rectangle</button>
+            <button class="tool-btn" data-tool="circle">Draw Circle</button>
+          </div>
+          <p class="hint">Tip: drag inside the canvas to place a shape. Use Select to drag existing shapes.</p>
+        </div>
+        <div class="panel">
+          <h2>Shapes</h2>
+          <div id="shapeList" class="shape-list"></div>
+          <div class="button-row">
+            <button id="deleteShapeBtn">Delete</button>
+            <button id="duplicateShapeBtn">Duplicate</button>
+          </div>
+        </div>
+        <div class="panel" id="shapeInspector">
+          <h2>Shape Details</h2>
+          <div id="inspectorEmpty">Select a shape to edit its properties.</div>
+          <div id="inspectorFields" class="hidden">
+            <label>Label <input id="shapeLabel" type="text"></label>
+            <label>Material
+              <select id="materialSelect">
+                <option value="magnet">Permanent Magnet</option>
+                <option value="steel">Steel</option>
+                <option value="wire">Wire / Current</option>
+                <option value="air">Air override</option>
+              </select>
+            </label>
+            <fieldset>
+              <legend>Geometry</legend>
+              <div class="geom-fields" data-shape="rect">
+                <label>Center X (m) <input id="rectCenterX" type="number" step="0.001"></label>
+                <label>Center Y (m) <input id="rectCenterY" type="number" step="0.001"></label>
+                <label>Width (m) <input id="rectWidth" type="number" min="0" step="0.001"></label>
+                <label>Height (m) <input id="rectHeight" type="number" min="0" step="0.001"></label>
+              </div>
+              <div class="geom-fields" data-shape="circle">
+                <label>Center X (m) <input id="circleCenterX" type="number" step="0.001"></label>
+                <label>Center Y (m) <input id="circleCenterY" type="number" step="0.001"></label>
+                <label>Radius (m) <input id="circleRadius" type="number" min="0" step="0.001"></label>
+              </div>
+            </fieldset>
+            <fieldset>
+              <legend>Material parameters</legend>
+              <div class="param-fields" data-material="magnet">
+                <label>µr <input id="magnetMu" type="number" step="0.01"></label>
+                <label>Mx (A/m) <input id="magnetMx" type="number" step="1000"></label>
+                <label>My (A/m) <input id="magnetMy" type="number" step="1000"></label>
+              </div>
+              <div class="param-fields" data-material="steel">
+                <label>µr <input id="steelMu" type="number" step="1"></label>
+              </div>
+              <div class="param-fields" data-material="air">
+                <label>µr <input id="airMu" type="number" step="0.01"></label>
+              </div>
+              <div class="param-fields" data-material="wire">
+                <label>Current (A) <input id="wireCurrent" type="number" step="10"></label>
+              </div>
+            </fieldset>
+          </div>
+        </div>
+        <div class="panel">
+          <h2>Output</h2>
+          <div class="button-row">
+            <button id="saveCaseBtn">Save to folder</button>
+            <button id="runCaseBtn">Run case</button>
+            <button id="downloadBtn">Download JSON</button>
+          </div>
+          <p id="statusLine" class="status"></p>
+        </div>
+      </section>
+      <section class="canvas-panel">
+        <canvas id="builderCanvas" width="720" height="720"></canvas>
+        <div class="canvas-hint">Scroll wheel zooms the page; hold Shift while dragging to constrain aspect.</div>
+      </section>
+    </main>
+  </div>
+  <script>
+    window.__BOOTSTRAP__ = {{ bootstrap | tojson }};
+  </script>
+  <script type="module" src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

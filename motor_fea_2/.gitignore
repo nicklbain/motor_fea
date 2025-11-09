@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.npz
+*.npz.zip
+.Python
+env/
+venv/
+.venv/
+pip-wheel-metadata/
+.idea/
+.vscode/
+.DS_Store
+case_builder_demo/mesh.npz
+cases/*/B_field.npz
+cases/*/Az_field.npz

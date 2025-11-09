@@ -21,11 +21,14 @@ Saved fields (per element unless noted):
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
 
 AIR, PMAG, STEEL = 0, 1, 2
+
+CASE_DEFINITION_FILENAME = "case_definition.json"
 
 def square_tri_mesh(Nx=100, Ny=100, Lx=1.0, Ly=1.0):
     """Structured square grid split into two CCW triangles per cell."""
@@ -185,6 +188,86 @@ def build_fields(nodes, tris, LxLy,
     return dict(nodes=nodes, tris=tris, region_id=region,
                 mu_r=mu_r, Mx=Mx, My=My, Jz=Jz, meta=meta)
 
+
+def build_fields_from_definition(nodes, tris, LxLy, definition, *, definition_source=None):
+    """Build material and source fields from a JSON case definition."""
+    Lx, Ly = LxLy
+    tri_area_vals = tri_areas(nodes, tris)
+    Ne = tris.shape[0]
+    region = np.full(Ne, AIR, dtype=np.int8)
+    mu_r = np.ones(Ne, dtype=float)
+    Mx = np.zeros(Ne, dtype=float)
+    My = np.zeros(Ne, dtype=float)
+    Jz = np.zeros(Ne, dtype=float)
+
+    defaults = definition.get("defaults", {})
+    objects = definition.get("objects", [])
+    geometry = []
+
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        material = str(obj.get("material", "air")).lower()
+        shape = obj.get("shape") or {}
+        params = obj.get("params") or {}
+        min_fill = float(obj.get("min_fill", 0.5))
+        fraction = _shape_overlap_fraction(shape, nodes, tris, tri_area_vals)
+        if fraction is None:
+            continue
+        has_overlap = fraction > 0
+        if not np.any(has_overlap):
+            geometry.append(obj)
+            continue
+
+        mat_defaults = defaults.get(material, {}) if isinstance(defaults, dict) else {}
+
+        def _param(key, fallback):
+            if key in params:
+                return params[key]
+            if isinstance(mat_defaults, dict) and key in mat_defaults:
+                return mat_defaults[key]
+            return fallback
+
+        if material in {"air", "magnet", "steel"}:
+            target_mu = float(_param("mu_r", 1.0 if material == "air" else 1.05 if material == "magnet" else 1000.0))
+            mu_r = np.where(has_overlap, (1.0 - fraction) * mu_r + fraction * target_mu, mu_r)
+            region_id = {"air": AIR, "magnet": PMAG, "steel": STEEL}[material]
+            region = np.where(fraction >= min_fill, region_id, region)
+            if material == "magnet":
+                target_mx = float(_param("Mx", 0.0))
+                target_my = float(_param("My", 8e5))
+                Mx = np.where(has_overlap, (1.0 - fraction) * Mx + fraction * target_mx, Mx)
+                My = np.where(has_overlap, (1.0 - fraction) * My + fraction * target_my, My)
+
+        if material == "wire":
+            total_current = float(_param("current", 0.0))
+            effective_area = float(np.dot(tri_area_vals, fraction))
+            if abs(effective_area) > 0:
+                Jz += (fraction * total_current / effective_area)
+
+        geometry.append(obj)
+
+    meta = dict(
+        Lx=Lx,
+        Ly=Ly,
+        defaults=defaults,
+        geometry=geometry,
+        case_definition=definition,
+    )
+    if definition_source:
+        meta["case_definition_source"] = str(definition_source)
+
+    return dict(
+        nodes=nodes,
+        tris=tris,
+        region_id=region,
+        mu_r=mu_r,
+        Mx=Mx,
+        My=My,
+        Jz=Jz,
+        meta=meta,
+    )
+
 def tri_areas(nodes, tris):
     P = nodes; T = tris
     x1,y1 = P[T[:,0],0], P[T[:,0],1]
@@ -209,6 +292,72 @@ def rect_overlap_fraction(nodes, tris, cx, cy, width, height, tri_area=None):
         if areas[idx] > 0:
             fractions[idx] = area / areas[idx]
     return fractions
+
+
+def circle_overlap_fraction(nodes, tris, cx, cy, radius):
+    """Approximate area fraction covered by a circle using barycentric samples."""
+    if radius <= 0:
+        return np.zeros(tris.shape[0], dtype=float)
+    pts = nodes[tris]  # (Ne,3,2)
+    bary_samples = (
+        (1 / 3, 1 / 3, 1 / 3),  # centroid
+        (0.5, 0.5, 0.0),
+        (0.5, 0.0, 0.5),
+        (0.0, 0.5, 0.5),
+        (0.8, 0.1, 0.1),
+        (0.1, 0.8, 0.1),
+        (0.1, 0.1, 0.8),
+    )
+    frac = np.zeros(tris.shape[0], dtype=float)
+    r2 = radius * radius
+    for bary in bary_samples:
+        sample = bary[0] * pts[:, 0, :] + bary[1] * pts[:, 1, :] + bary[2] * pts[:, 2, :]
+        inside = ((sample[:, 0] - cx) ** 2 + (sample[:, 1] - cy) ** 2) <= r2
+        frac += inside.astype(float)
+    frac /= len(bary_samples)
+    return frac
+
+
+def _shape_overlap_fraction(shape, nodes, tris, tri_area_vals):
+    if not isinstance(shape, dict):
+        return None
+    stype = str(shape.get("type", "")).lower()
+    if stype == "rect":
+        center = shape.get("center", [0.0, 0.0])
+        if isinstance(center, dict):
+            cx = center.get("x", 0.0)
+            cy = center.get("y", 0.0)
+        else:
+            cx, cy = center
+        size = shape.get("size")
+        if isinstance(size, dict):
+            size_w = size.get("width")
+            size_h = size.get("height")
+        elif size is not None:
+            size_w = size_h = size
+        else:
+            size_w = size_h = None
+        width = shape.get("width", size_w if size_w is not None else 0.0)
+        height = shape.get("height", size_h if size_h is not None else 0.0)
+        return rect_overlap_fraction(
+            nodes,
+            tris,
+            float(cx),
+            float(cy),
+            float(width),
+            float(height),
+            tri_area_vals,
+        )
+    if stype == "circle":
+        center = shape.get("center", [0.0, 0.0])
+        if isinstance(center, dict):
+            cx = center.get("x", 0.0)
+            cy = center.get("y", 0.0)
+        else:
+            cx, cy = center
+        radius = shape.get("radius", 0.0)
+        return circle_overlap_fraction(nodes, tris, float(cx), float(cy), float(radius))
+    return None
 
 
 def polygon_rect_overlap_area(tri_pts, xmin, xmax, ymin, ymax):
@@ -286,6 +435,11 @@ def _parse_args() -> argparse.Namespace:
                         help="Case subfolder name under --cases-dir (default: mag2d_case)")
     parser.add_argument("--cases-dir", default="cases",
                         help="Directory that stores case subfolders (default: cases)")
+    parser.add_argument("--case-config",
+                        help=(
+                            "Path to a JSON case definition. If omitted, the generator looks "
+                            "for cases/<case>/case_definition.json."
+                        ))
     parser.add_argument("--Nx", type=int, default=100, help="Grid count along X (default: 100)")
     parser.add_argument("--Ny", type=int, default=100, help="Grid count along Y (default: 100)")
     parser.add_argument("--Lx", type=float, default=1.0, help="Domain width (m)")
@@ -316,25 +470,81 @@ def _write_case(payload: dict, case_dir: Path, filename: str = "mesh.npz") -> Pa
     return outpath
 
 
+def _resolve_case_definition_path(arg_path: str | None, case_dir: Path) -> Path | None:
+    if arg_path:
+        path = Path(arg_path).expanduser().resolve()
+        if not path.exists():
+            raise FileNotFoundError(f"Case definition '{path}' was not found")
+        return path
+    candidate = (case_dir / CASE_DEFINITION_FILENAME).resolve()
+    return candidate if candidate.exists() else None
+
+
+def _load_case_definition(path: Path) -> dict:
+    with path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _grid_from_args(args: argparse.Namespace, definition: dict | None) -> dict:
+    grid = {
+        "Nx": int(args.Nx),
+        "Ny": int(args.Ny),
+        "Lx": float(args.Lx),
+        "Ly": float(args.Ly),
+    }
+    if definition and isinstance(definition, dict):
+        overrides = definition.get("grid", {})
+        if isinstance(overrides, dict):
+            for key in grid:
+                if key in overrides:
+                    grid[key] = type(grid[key])(overrides[key])
+    return grid
+
+
 if __name__ == "__main__":
     args = _parse_args()
+    case_dir = (Path(args.cases_dir) / args.case).resolve()
+    case_def_path = _resolve_case_definition_path(args.case_config, case_dir)
+    case_definition = _load_case_definition(case_def_path) if case_def_path else None
 
-    nodes, tris, L = square_tri_mesh(Nx=args.Nx, Ny=args.Ny, Lx=args.Lx, Ly=args.Ly)
-    payload = build_fields(nodes, tris, L,
-                           include_magnet=not args.no_magnet,
-                           include_steel=not args.no_steel,
-                           include_wire=not args.no_wire,
-                           magnet_My=args.magnet_My,
-                           mu_r_magnet=args.mu_r_magnet,
-                           mu_r_steel=args.mu_r_steel,
-                           wire_current=args.wire_current,
-                           wire_radius=args.wire_radius)
-    case_dir = Path(args.cases_dir) / args.case
+    grid = _grid_from_args(args, case_definition)
+    nodes, tris, L = square_tri_mesh(Nx=grid["Nx"], Ny=grid["Ny"], Lx=grid["Lx"], Ly=grid["Ly"])
+
+    if case_definition:
+        source = case_def_path
+        try:
+            source = case_def_path.relative_to(case_dir)
+        except ValueError:
+            pass
+        payload = build_fields_from_definition(
+            nodes,
+            tris,
+            (grid["Lx"], grid["Ly"]),
+            case_definition,
+            definition_source=str(source),
+        )
+    else:
+        payload = build_fields(
+            nodes,
+            tris,
+            (grid["Lx"], grid["Ly"]),
+            include_magnet=not args.no_magnet,
+            include_steel=not args.no_steel,
+            include_wire=not args.no_wire,
+            magnet_My=args.magnet_My,
+            mu_r_magnet=args.mu_r_magnet,
+            mu_r_steel=args.mu_r_steel,
+            wire_current=args.wire_current,
+            wire_radius=args.wire_radius,
+        )
+
     outpath = _write_case(payload, case_dir)
-    print(f"Wrote {outpath} with:",
-          f"\n  nodes={payload['nodes'].shape}",
-          f"\n  tris={payload['tris'].shape}",
-          f"\n  mu_r:  [{payload['mu_r'].min():.3g}, {payload['mu_r'].max():.3g}]",
-          f"\n  |M|:   [{np.hypot(payload['Mx'],payload['My']).min():.3g}, "
-          f"{np.hypot(payload['Mx'],payload['My']).max():.3g}] A/m",
-          f"\n  Jz sum={payload['Jz'].sum()* (args.Lx * args.Ly):.6g} A (approx)")
+    print(
+        f"Wrote {outpath} with:",
+        f"\n  nodes={payload['nodes'].shape}",
+        f"\n  tris={payload['tris'].shape}",
+        f"\n  mu_r:  [{payload['mu_r'].min():.3g}, {payload['mu_r'].max():.3g}]",
+        f"\n  |M|:   [{np.hypot(payload['Mx'],payload['My']).min():.3g}, "
+        f"{np.hypot(payload['Mx'],payload['My']).max():.3g}] A/m",
+        f"\n  Jz sum={payload['Jz'].sum() * (grid['Lx'] * grid['Ly']):.6g} A (approx)",
+    )

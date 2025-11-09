@@ -17,9 +17,10 @@ All scripts are pure Python and only depend on NumPy/SciPy (viewer additionally 
 python3 -m venv .venv
 . .venv/bin/activate
 
-# 2) Install dependencies for solver + viewer
+# 2) Install dependencies for solver + viewer (and case builder if you plan to use it)
 pip install numpy scipy
 pip install -r viewer/requirements.txt
+pip install -r case_builder/requirements.txt  # optional UI for drawing geometries
 
 # 3) Generate a case (writes cases/<case>/mesh.npz)
 python3 mesh_and_sources.py --case demo_case
@@ -60,6 +61,7 @@ Each case lives under `cases/<case_name>/`:
 | --- | --- |
 | `--case <name>` | Case subfolder under `--cases-dir` (default: `mag2d_case`). |
 | `--cases-dir <path>` | Where case folders live (default: `cases`). |
+| `--case-config <file>` | Path to a JSON case definition. Defaults to `cases/<case>/case_definition.json` when present. |
 | `--Nx`, `--Ny` | Structured grid resolution (default: 100×100). |
 | `--Lx`, `--Ly` | Domain size in meters. |
 | `--magnet-My` | Permanent magnet strength `My` in A/m (default: \(8\times10^5\)). |
@@ -94,3 +96,44 @@ Feel free to replace `mesh_and_sources.py` with your own mesher as long as you e
 * Material/source arrays (`region_id`, `mu_r`, `Mx`, `My`, `Jz`) are per triangle.
 
 Everything else (edge magnet loads, Neumann solve, B-field computation) happens automatically.
+
+---
+
+## Case Builder (experimental)
+
+The `case_builder/` Flask app lets you sketch rectangles and circles, tag them as magnets/steel/wires, and save the geometry + material parameters to `cases/<case>/case_definition.json`. When that file exists (or when you pass `--case-config`), `mesh_and_sources.py` consumes it instead of the hard-coded demo geometry.
+
+**Usage**
+
+```bash
+pip install -r case_builder/requirements.txt
+python3 case_builder/app.py --debug
+# open http://127.0.0.1:5050, draw shapes, then "Save to folder"
+python3 mesh_and_sources.py --case <your_case>
+```
+
+Each saved definition looks like:
+
+```json
+{
+  "name": "demo",
+  "grid": {"Nx": 120, "Ny": 120, "Lx": 0.4, "Ly": 0.3},
+  "objects": [
+    {
+      "id": "magnet-1",
+      "label": "Left magnet",
+      "material": "magnet",
+      "shape": {"type": "rect", "center": [0.15, 0.15], "width": 0.08, "height": 0.06},
+      "params": {"mu_r": 1.05, "Mx": 0.0, "My": 800000.0}
+    },
+    {
+      "id": "wire-upper",
+      "material": "wire",
+      "shape": {"type": "circle", "center": {"x": 0.25, "y": 0.22}, "radius": 0.02},
+      "params": {"current": -5000.0}
+    }
+  ]
+}
+```
+
+Fields that overlap get applied in list order, so later shapes win. Rectangles benefit from exact area clipping, while circles use barycentric sampling (good for grids ≥ ~50×50). The point-and-click UI is intentionally simple now but the JSON schema is human-readable, versionable, and forward-compatible with future features (DXF import, arcs, etc.).
