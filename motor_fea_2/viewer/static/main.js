@@ -161,6 +161,7 @@ function setCaseSelection(caseName) {
 }
 
 async function refreshCaseList(andNotify = true) {
+  const previousSelection = state.caseName || caseSelect.value || null;
   try {
     const response = await fetch("/api/cases");
     if (!response.ok) {
@@ -169,6 +170,9 @@ async function refreshCaseList(andNotify = true) {
     const data = await response.json();
     const caseList = data.cases || [];
     setCaseOptions(caseList, data.default);
+    if (previousSelection) {
+      setCaseSelection(previousSelection);
+    }
     if (andNotify) {
       updateStatus(`Found ${caseList.length} case(s).`);
     }
@@ -187,10 +191,45 @@ async function refreshCaseList(andNotify = true) {
   }
 }
 
-async function loadMesh(caseName) {
+async function refreshActiveCase() {
+  updateStatus("Refreshing cases…");
+  const activeCase = state.caseName || caseSelect.value || null;
+  const data = await refreshCaseList();
+  if (!data) {
+    return null;
+  }
+  if (!activeCase) {
+    if (caseSelect.value) {
+      return loadMesh(caseSelect.value);
+    }
+    showOverlay("No mesh cases found. Run mesh_and_sources.py first.");
+    return data;
+  }
+
+  const stillPresent = setCaseSelection(activeCase);
+  if (stillPresent) {
+    return loadMesh(activeCase, { preserveView: true, preserveSelection: true });
+  }
+
+  if (caseSelect.value) {
+    updateStatus(`Active case '${activeCase}' missing. Loading ${caseSelect.value} instead.`);
+    return loadMesh(caseSelect.value);
+  }
+
+  showOverlay("No mesh cases found. Run mesh_and_sources.py first.");
+  updateStatus("No cases available.");
+  return data;
+}
+
+async function loadMesh(caseName, options = {}) {
   if (!caseName) {
     return null;
   }
+  const { preserveView = false, preserveSelection = false } = options;
+  const previousSelection =
+    preserveSelection && state.selectedCellIndex !== null
+      ? state.selectedCellIndex
+      : null;
   showOverlay("Loading mesh…");
   updateStatus(`Loading ${caseName}…`);
   try {
@@ -212,10 +251,21 @@ async function loadMesh(caseName) {
     state.caseName = caseName;
     state.edges = buildEdges(mesh.tris || []);
     state.centroids = computeCentroids(mesh.nodes || [], mesh.tris || []);
-    state.selectedCellIndex = null;
-    fitViewToBounds(mesh.bounds);
+    if (
+      preserveSelection &&
+      previousSelection !== null &&
+      previousSelection >= 0 &&
+      previousSelection < state.centroids.length
+    ) {
+      state.selectedCellIndex = previousSelection;
+    } else {
+      state.selectedCellIndex = null;
+    }
+    if (!preserveView) {
+      fitViewToBounds(mesh.bounds);
+    }
     updateSummary(mesh);
-    updateCellInfo(null);
+    updateCellInfo(state.selectedCellIndex);
     syncLayerAvailability();
     showOverlay("");
     updateStatus(
@@ -571,7 +621,17 @@ function normalizeDesignShape(entry, fallbackRole = "magnet") {
     if (!(width > 0 && height > 0)) {
       return null;
     }
-    return { type: "rect", center, width, height, role };
+    const angle = normalizeAngleDegrees(
+      firstFiniteNumber(
+        shapeDef.angle,
+        entry.angle,
+        shapeDef.rotation,
+        entry.rotation,
+        shapeDef.theta,
+        entry.theta
+      )
+    );
+    return { type: "rect", center, width, height, role, angle };
   }
   if (type === "circle") {
     const radius = firstFiniteNumber(
@@ -585,6 +645,31 @@ function normalizeDesignShape(entry, fallbackRole = "magnet") {
       return null;
     }
     return { type: "circle", center, radius, role };
+  }
+  if (type === "ring") {
+    const outer = firstFiniteNumber(
+      shapeDef.outer_radius,
+      shapeDef.outerRadius,
+      shapeDef.radius,
+      shapeDef.size && typeof shapeDef.size === "object" ? shapeDef.size.outer : null,
+      typeof shapeDef.size === "number" ? shapeDef.size : null,
+      shapeDef.od ? Number(shapeDef.od) / 2 : null,
+      shapeDef.width ? Number(shapeDef.width) / 2 : null,
+      shapeDef.height ? Number(shapeDef.height) / 2 : null
+    );
+    const inner = firstFiniteNumber(
+      shapeDef.inner_radius,
+      shapeDef.innerRadius,
+      shapeDef.radius_inner,
+      shapeDef.inner,
+      shapeDef.id ? Number(shapeDef.id) / 2 : null,
+      shapeDef.t ? outer && Number.isFinite(Number(shapeDef.t)) ? outer - Number(shapeDef.t) : null : null
+    );
+    if (!(outer > 0)) {
+      return null;
+    }
+    const clampedInner = Math.max(0, Math.min(inner ?? 0, outer - 1e-9));
+    return { type: "ring", center, outer_radius: outer, inner_radius: clampedInner, role };
   }
   return null;
 }
@@ -604,6 +689,20 @@ function normalizeCenter(raw) {
     }
   }
   return null;
+}
+
+function normalizeAngleDegrees(value) {
+  const angle = Number(value);
+  if (!Number.isFinite(angle)) {
+    return 0;
+  }
+  let normalized = angle % 360;
+  if (normalized > 180) {
+    normalized -= 360;
+  } else if (normalized <= -180) {
+    normalized += 360;
+  }
+  return normalized === -0 ? 0 : normalized;
 }
 
 function firstFiniteNumber(...values) {
@@ -719,6 +818,8 @@ function drawTargetGeometry() {
       drawDesignRect(shape);
     } else if (shape.type === "circle") {
       drawDesignCircle(shape);
+    } else if (shape.type === "ring") {
+      drawDesignRing(shape);
     }
   }
   ctx.restore();
@@ -740,12 +841,28 @@ function drawDesignRect(shape) {
   const halfH = (shape.height || 0) / 2;
   const cx = shape.center?.[0] ?? 0;
   const cy = shape.center?.[1] ?? 0;
-  const corners = [
-    worldToScreen(cx - halfW, cy - halfH),
-    worldToScreen(cx + halfW, cy - halfH),
-    worldToScreen(cx + halfW, cy + halfH),
-    worldToScreen(cx - halfW, cy + halfH),
+  if (!(halfW > 0 && halfH > 0)) {
+    return;
+  }
+  const angleDeg = Number(shape.angle) || 0;
+  let cosA = 1;
+  let sinA = 0;
+  if (angleDeg) {
+    const angleRad = (angleDeg * Math.PI) / 180;
+    cosA = Math.cos(angleRad);
+    sinA = Math.sin(angleRad);
+  }
+  const offsets = [
+    [-halfW, -halfH],
+    [halfW, -halfH],
+    [halfW, halfH],
+    [-halfW, halfH],
   ];
+  const corners = offsets.map(([dx, dy]) => {
+    const rx = dx * cosA - dy * sinA;
+    const ry = dx * sinA + dy * cosA;
+    return worldToScreen(cx + rx, cy + ry);
+  });
   ctx.beginPath();
   ctx.moveTo(corners[0].x, corners[0].y);
   for (let i = 1; i < corners.length; i += 1) {
@@ -765,6 +882,21 @@ function drawDesignCircle(shape) {
   ctx.beginPath();
   ctx.ellipse(centerScreen.x, centerScreen.y, screenRadius, screenRadius, 0, 0, Math.PI * 2);
   ctx.stroke();
+}
+
+function drawDesignRing(shape) {
+  const outer = Math.max(0, shape.outer_radius ?? shape.radius ?? 0);
+  const inner = Math.max(0, Math.min(shape.inner_radius ?? 0, outer));
+  if (!(outer > 0)) {
+    if (inner > 0) {
+      drawDesignCircle({ center: shape.center, radius: inner });
+    }
+    return;
+  }
+  drawDesignCircle({ center: shape.center, radius: outer });
+  if (inner > 0) {
+    drawDesignCircle({ center: shape.center, radius: inner });
+  }
 }
 
 function materialColor(regionId, jzValue, threshold) {
@@ -1097,10 +1229,9 @@ caseSelect.addEventListener("change", () => {
 });
 
 refreshBtn.addEventListener("click", () => {
-  refreshCaseList().then(() => {
-    if (!state.caseName && caseSelect.value) {
-      loadMesh(caseSelect.value);
-    }
+  refreshActiveCase().catch((error) => {
+    const message = error?.message || String(error);
+    updateStatus(`Refresh failed: ${message}`);
   });
 });
 
@@ -1312,14 +1443,16 @@ const MeshViewerAPI = {
     if (!caseName) {
       return Promise.resolve(null);
     }
-    if (options.syncSelection !== false) {
+    const { syncSelection = true, ...loadOptions } = options;
+    if (syncSelection) {
       setCaseSelection(caseName);
     }
-    return loadMesh(caseName);
+    return loadMesh(caseName, loadOptions);
   },
   refreshCases({ notify = true } = {}) {
     return refreshCaseList(notify);
   },
+  refreshActiveCase,
   setCaseSelection,
 };
 

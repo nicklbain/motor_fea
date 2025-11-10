@@ -105,7 +105,7 @@ Everything else (edge magnet loads, Neumann solve, B-field computation) happens 
 
 ## Case Builder (experimental)
 
-The `case_builder/` Flask app lets you sketch rectangles and circles, tag them as magnets/steel/wires, and save the geometry + material parameters to `cases/<case>/case_definition.json`. When that file exists (or when you pass `--case-config`), `mesh_and_sources.py` consumes it instead of the hard-coded demo geometry.
+The `case_builder/` Flask app lets you sketch rectangles, circles, and rings, tag them as magnets/steel/wires, and save the geometry + material parameters to `cases/<case>/case_definition.json`. When that file exists (or when you pass `--case-config`), `mesh_and_sources.py` consumes it instead of the hard-coded demo geometry.
 
 **Usage**
 
@@ -141,5 +141,18 @@ Each saved definition looks like:
 ```
 
 Fields that overlap get applied in list order, so later shapes win. Rectangles benefit from exact area clipping, while circles use barycentric sampling (good for grids ≥ ~50×50). The point-and-click UI is intentionally simple now but the JSON schema is human-readable, versionable, and forward-compatible with future features (DXF import, arcs, etc.).
+
+Permanent magnet `params.Mx/My` are specified in the shape's local (unrotated) axes; if you set `shape.angle`, the magnetization vector is rotated by the same amount so the magnet's polarization stays aligned with the body.
+
+
+## To do:
+
+- Don't mesh everywhere with the same density
+- Import DXFs to case builder
+- Verify ok if materials are touching each other
+- Add ability to draw rectangle, circle, or ring and use as loop for integrating Maxwell Stress tensor -> display Fx, Fy, torque per Z
+
+
+
 
 

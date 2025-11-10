@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -234,8 +235,10 @@ def build_fields_from_definition(nodes, tris, LxLy, definition, *, definition_so
             region_id = {"air": AIR, "magnet": PMAG, "steel": STEEL}[material]
             region = np.where(fraction >= min_fill, region_id, region)
             if material == "magnet":
-                target_mx = float(_param("Mx", 0.0))
-                target_my = float(_param("My", 8e5))
+                target_mx_local = float(_param("Mx", 0.0))
+                target_my_local = float(_param("My", 8e5))
+                angle_deg = _shape_angle_degrees(shape)
+                target_mx, target_my = _rotate_xy(target_mx_local, target_my_local, angle_deg)
                 Mx = np.where(has_overlap, (1.0 - fraction) * Mx + fraction * target_mx, Mx)
                 My = np.where(has_overlap, (1.0 - fraction) * My + fraction * target_my, My)
 
@@ -276,18 +279,36 @@ def tri_areas(nodes, tris):
     return 0.5*np.abs((x2-x1)*(y3-y1) - (y2-y1)*(x3-x1))
 
 
-def rect_overlap_fraction(nodes, tris, cx, cy, width, height, tri_area=None):
-    """Return area fraction of each triangle covered by an axis-aligned rectangle."""
+def rect_overlap_fraction(nodes, tris, cx, cy, width, height, tri_area=None, angle_deg=0.0):
+    """Return area fraction of each triangle covered by a (possibly rotated) rectangle."""
     if width <= 0 or height <= 0:
         return np.zeros(tris.shape[0], dtype=float)
-    xmin = cx - width / 2
-    xmax = cx + width / 2
-    ymin = cy - height / 2
-    ymax = cy + height / 2
+
     tri_pts = nodes[tris]
     areas = tri_area if tri_area is not None else tri_areas(nodes, tris)
     fractions = np.zeros(tris.shape[0], dtype=float)
-    for idx, pts in enumerate(tri_pts):
+    angle_rad = math.radians(angle_deg)
+
+    if abs(angle_rad) < 1e-9:
+        xmin = cx - width / 2
+        xmax = cx + width / 2
+        ymin = cy - height / 2
+        ymax = cy + height / 2
+        pts_iter = tri_pts
+    else:
+        center = np.array([cx, cy])
+        local = tri_pts - center
+        cos_a = math.cos(angle_rad)
+        sin_a = math.sin(angle_rad)
+        rot_x = local[:, :, 0] * cos_a + local[:, :, 1] * sin_a
+        rot_y = -local[:, :, 0] * sin_a + local[:, :, 1] * cos_a
+        pts_iter = np.stack((rot_x, rot_y), axis=2)
+        xmin = -width / 2
+        xmax = width / 2
+        ymin = -height / 2
+        ymax = height / 2
+
+    for idx, pts in enumerate(pts_iter):
         area = polygon_rect_overlap_area(pts, xmin, xmax, ymin, ymax)
         if areas[idx] > 0:
             fractions[idx] = area / areas[idx]
@@ -318,6 +339,18 @@ def circle_overlap_fraction(nodes, tris, cx, cy, radius):
     return frac
 
 
+def ring_overlap_fraction(nodes, tris, cx, cy, outer_radius, inner_radius):
+    """Area fraction covered by a ring = outer disk minus inner disk."""
+    if outer_radius <= 0:
+        return np.zeros(tris.shape[0], dtype=float)
+    outer = circle_overlap_fraction(nodes, tris, cx, cy, outer_radius)
+    if inner_radius <= 0:
+        return outer
+    inner = circle_overlap_fraction(nodes, tris, cx, cy, min(inner_radius, outer_radius))
+    frac = outer - inner
+    return np.clip(frac, 0.0, 1.0)
+
+
 def _shape_overlap_fraction(shape, nodes, tris, tri_area_vals):
     if not isinstance(shape, dict):
         return None
@@ -339,6 +372,7 @@ def _shape_overlap_fraction(shape, nodes, tris, tri_area_vals):
             size_w = size_h = None
         width = shape.get("width", size_w if size_w is not None else 0.0)
         height = shape.get("height", size_h if size_h is not None else 0.0)
+        angle = shape.get("angle", 0.0)
         return rect_overlap_fraction(
             nodes,
             tris,
@@ -347,6 +381,7 @@ def _shape_overlap_fraction(shape, nodes, tris, tri_area_vals):
             float(width),
             float(height),
             tri_area_vals,
+            float(angle),
         )
     if stype == "circle":
         center = shape.get("center", [0.0, 0.0])
@@ -357,7 +392,44 @@ def _shape_overlap_fraction(shape, nodes, tris, tri_area_vals):
             cx, cy = center
         radius = shape.get("radius", 0.0)
         return circle_overlap_fraction(nodes, tris, float(cx), float(cy), float(radius))
+    if stype == "ring":
+        center = shape.get("center", [0.0, 0.0])
+        if isinstance(center, dict):
+            cx = center.get("x", 0.0)
+            cy = center.get("y", 0.0)
+        else:
+            cx, cy = center
+        outer = shape.get("outer_radius", shape.get("outerRadius", shape.get("radius", 0.0)))
+        inner = shape.get("inner_radius", shape.get("innerRadius", 0.0))
+        return ring_overlap_fraction(
+            nodes,
+            tris,
+            float(cx),
+            float(cy),
+            float(outer),
+            float(inner),
+        )
     return None
+
+
+def _shape_angle_degrees(shape) -> float:
+    """Return the rotation angle declared on a shape, defaulting to 0."""
+    if isinstance(shape, dict) and "angle" in shape:
+        try:
+            return float(shape.get("angle", 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
+
+
+def _rotate_xy(mx: float, my: float, angle_deg: float) -> tuple[float, float]:
+    """Rotate a 2-D vector by angle_deg (CCW, degrees)."""
+    if not angle_deg:
+        return mx, my
+    angle_rad = math.radians(angle_deg)
+    cos_a = math.cos(angle_rad)
+    sin_a = math.sin(angle_rad)
+    return mx * cos_a - my * sin_a, mx * sin_a + my * cos_a
 
 
 def polygon_rect_overlap_area(tri_pts, xmin, xmax, ymin, ymax):
