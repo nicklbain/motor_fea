@@ -31,12 +31,39 @@
           </label>
         </div>
         <div class="panel">
-          <h2>Grid</h2>
+          <h2>Grid &amp; Mesh</h2>
           <div class="grid-inputs">
-            <label>Nx <input id="gridNx" type="number" min="4" step="1"></label>
-            <label>Ny <input id="gridNy" type="number" min="4" step="1"></label>
             <label>Lx (m) <input id="gridLx" type="number" min="0.01" step="0.01"></label>
             <label>Ly (m) <input id="gridLy" type="number" min="0.01" step="0.01"></label>
+            <label>Mesh mode
+              <select id="gridMeshMode">
+                <option value="graded">Adaptive (focus near materials)</option>
+                <option value="uniform">Uniform (legacy Nx × Ny)</option>
+              </select>
+            </label>
+          </div>
+          <div id="gradedMeshControls" class="mesh-controls">
+            <div class="grid-inputs">
+              <label>Fine pitch X (m) <input id="gridFineX" type="number" min="1e-4" step="0.001"></label>
+              <label>Fine pitch Y (optional m) <input id="gridFineY" type="number" min="1e-4" step="0.001" placeholder="match X"></label>
+              <label>Coarse pitch X (m) <input id="gridCoarseX" type="number" min="1e-4" step="0.001"></label>
+              <label>Coarse pitch Y (optional m) <input id="gridCoarseY" type="number" min="1e-4" step="0.001" placeholder="match X"></label>
+              <label>Focus padding (m) <input id="gridFocusPad" type="number" min="0" step="0.001"></label>
+              <label>Falloff (m) <input id="gridFocusFalloff" type="number" min="0" step="0.001"></label>
+            </div>
+            <div class="mesh-materials">
+              <span>Focus materials</span>
+              <label><input type="checkbox" id="meshFocusMagnet"> Magnets</label>
+              <label><input type="checkbox" id="meshFocusSteel"> Steel</label>
+              <label><input type="checkbox" id="meshFocusWire"> Wires</label>
+            </div>
+          </div>
+          <div id="uniformMeshControls" class="mesh-controls">
+            <div class="grid-inputs">
+              <label>Nx <input id="gridNx" type="number" min="4" step="1"></label>
+              <label>Ny <input id="gridNy" type="number" min="4" step="1"></label>
+            </div>
+            <p class="hint">Uniform meshes are preserved for backward compatibility. Adaptive mode is recommended.</p>
           </div>
         </div>
         <div class="panel">

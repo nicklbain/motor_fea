@@ -9,7 +9,20 @@ from typing import Any, Dict, List
 from flask import Flask, abort, jsonify, render_template, request
 
 CASE_DEFINITION_FILENAME = "case_definition.json"
-DEFAULT_GRID = {"Nx": 120, "Ny": 120, "Lx": 1.0, "Ly": 1.0}
+DEFAULT_GRID = {
+    "Nx": 160,
+    "Ny": 160,
+    "Lx": 1.0,
+    "Ly": 1.0,
+    "mesh": {
+        "type": "graded",
+        "coarse": 0.02,
+        "fine": 0.005,
+        "focus_pad": 0.02,
+        "focus_falloff": 0.01,
+        "focus_materials": ["magnet", "steel", "wire"],
+    },
+}
 
 APP_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = APP_ROOT.parent

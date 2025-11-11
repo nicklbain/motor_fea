@@ -31,10 +31,28 @@ AIR, PMAG, STEEL = 0, 1, 2
 
 CASE_DEFINITION_FILENAME = "case_definition.json"
 
-def square_tri_mesh(Nx=100, Ny=100, Lx=1.0, Ly=1.0):
+def square_tri_mesh(Nx=100, Ny=100, Lx=1.0, Ly=1.0, *,
+                    x_coords: np.ndarray | None = None,
+                    y_coords: np.ndarray | None = None):
     """Structured square grid split into two CCW triangles per cell."""
-    x = np.linspace(0, Lx, Nx)
-    y = np.linspace(0, Ly, Ny)
+    if x_coords is not None:
+        x = np.asarray(x_coords, dtype=float)
+        if x.ndim != 1 or x.size < 2:
+            raise ValueError("x_coords must be 1-D with at least 2 entries")
+        if abs(x[0]) > 1e-12 or abs(x[-1] - Lx) > 1e-9:
+            raise ValueError("x_coords must span [0, Lx]")
+        Nx = x.size
+    else:
+        x = np.linspace(0, Lx, Nx)
+    if y_coords is not None:
+        y = np.asarray(y_coords, dtype=float)
+        if y.ndim != 1 or y.size < 2:
+            raise ValueError("y_coords must be 1-D with at least 2 entries")
+        if abs(y[0]) > 1e-12 or abs(y[-1] - Ly) > 1e-9:
+            raise ValueError("y_coords must span [0, Ly]")
+        Ny = y.size
+    else:
+        y = np.linspace(0, Ly, Ny)
     X, Y = np.meshgrid(x, y, indexing="ij")
     nodes = np.column_stack([X.ravel(), Y.ravel()])
     def nid(i,j): return i*Ny + j
@@ -61,6 +79,295 @@ def square_tri_mesh(Nx=100, Ny=100, Lx=1.0, Ly=1.0):
             tris[k,[1,2]] = tris[k,[2,1]]
     return nodes, tris, (Lx, Ly)
 
+
+def _shape_bounds(shape: dict | None) -> tuple[float, float, float, float] | None:
+    """Return (xmin, xmax, ymin, ymax) for a supported shape."""
+    if not isinstance(shape, dict):
+        return None
+    stype = str(shape.get("type", "")).lower()
+    if stype == "rect":
+        center = shape.get("center", [0.0, 0.0])
+        if isinstance(center, dict):
+            cx = float(center.get("x", 0.0))
+            cy = float(center.get("y", 0.0))
+        else:
+            if isinstance(center, (list, tuple)) and len(center) >= 2:
+                cx, cy = float(center[0]), float(center[1])
+            else:
+                cx = cy = 0.0
+        size = shape.get("size")
+        if isinstance(size, dict):
+            size_w = size.get("width")
+            size_h = size.get("height")
+        elif size is not None:
+            size_w = size_h = size
+        else:
+            size_w = size_h = None
+        width = float(shape.get("width", size_w if size_w is not None else 0.0))
+        height = float(shape.get("height", size_h if size_h is not None else 0.0))
+        if width <= 0 or height <= 0:
+            return None
+        half_w = 0.5 * width
+        half_h = 0.5 * height
+        corners = np.array([
+            [ half_w,  half_h],
+            [ half_w, -half_h],
+            [-half_w, -half_h],
+            [-half_w,  half_h],
+        ])
+        angle = float(shape.get("angle", 0.0))
+        if angle:
+            ang = math.radians(angle)
+            rot = np.array([[math.cos(ang), -math.sin(ang)],
+                            [math.sin(ang),  math.cos(ang)]])
+            corners = corners @ rot.T
+        corners += np.array([cx, cy])
+        xmin = float(corners[:, 0].min())
+        xmax = float(corners[:, 0].max())
+        ymin = float(corners[:, 1].min())
+        ymax = float(corners[:, 1].max())
+        return xmin, xmax, ymin, ymax
+    if stype == "circle":
+        center = shape.get("center", [0.0, 0.0])
+        if isinstance(center, dict):
+            cx = float(center.get("x", 0.0))
+            cy = float(center.get("y", 0.0))
+        else:
+            if isinstance(center, (list, tuple)) and len(center) >= 2:
+                cx, cy = float(center[0]), float(center[1])
+            else:
+                cx = cy = 0.0
+        radius = float(shape.get("radius", 0.0))
+        if radius <= 0:
+            return None
+        return cx - radius, cx + radius, cy - radius, cy + radius
+    if stype == "ring":
+        center = shape.get("center", [0.0, 0.0])
+        if isinstance(center, dict):
+            cx = float(center.get("x", 0.0))
+            cy = float(center.get("y", 0.0))
+        else:
+            if isinstance(center, (list, tuple)) and len(center) >= 2:
+                cx, cy = float(center[0]), float(center[1])
+            else:
+                cx = cy = 0.0
+        radius = float(shape.get("outer_radius",
+                                 shape.get("outerRadius",
+                                           shape.get("radius", 0.0))))
+        if radius <= 0:
+            return None
+        return cx - radius, cx + radius, cy - radius, cy + radius
+    return None
+
+
+def _merge_intervals(intervals: list[tuple[float, float]], *, eps: float = 1e-12
+                    ) -> list[tuple[float, float]]:
+    if not intervals:
+        return []
+    intervals = sorted(intervals, key=lambda ab: ab[0])
+    merged: list[tuple[float, float]] = []
+    cur_start, cur_end = intervals[0]
+    for start, end in intervals[1:]:
+        if start <= cur_end + eps:
+            cur_end = max(cur_end, end)
+        else:
+            merged.append((cur_start, cur_end))
+            cur_start, cur_end = start, end
+    merged.append((cur_start, cur_end))
+    return merged
+
+
+def _collect_focus_spans(definition: dict | None,
+                         axis: str,
+                         *,
+                         length: float,
+                         materials: list[str] | None,
+                         pad: float,
+                         manual_boxes: list[dict] | None) -> list[tuple[float, float]]:
+    spans: list[tuple[float, float]] = []
+    if isinstance(definition, dict):
+        objs = definition.get("objects", [])
+        if isinstance(objs, list):
+            for obj in objs:
+                if not isinstance(obj, dict):
+                    continue
+                material = str(obj.get("material", "air")).lower()
+                if materials and material not in materials:
+                    continue
+                bounds = _shape_bounds(obj.get("shape"))
+                if bounds is None:
+                    continue
+                if axis == "x":
+                    lo, hi = bounds[0], bounds[1]
+                else:
+                    lo, hi = bounds[2], bounds[3]
+                span_start = lo - pad
+                span_end = hi + pad
+                spans.append((span_start, span_end))
+    if manual_boxes:
+        for box in manual_boxes:
+            if not isinstance(box, dict):
+                continue
+            coords = box.get(axis)
+            if isinstance(coords, (list, tuple)) and len(coords) == 2:
+                spans.append((float(coords[0]), float(coords[1])))
+    clipped: list[tuple[float, float]] = []
+    for start, end in spans:
+        lo = float(min(start, end))
+        hi = float(max(start, end))
+        lo = max(0.0, lo)
+        hi = min(length, hi)
+        if hi - lo > 1e-9:
+            clipped.append((lo, hi))
+    return _merge_intervals(clipped)
+
+
+def _axis_setting(mesh_spec: dict, axis: str, key: str, default=None):
+    axis_dict = mesh_spec.get(axis)
+    if isinstance(axis_dict, dict) and key in axis_dict:
+        return axis_dict[key]
+    axis_key = f"{key}_{axis}"
+    if axis_key in mesh_spec:
+        return mesh_spec[axis_key]
+    return mesh_spec.get(key, default)
+
+
+def _axis_spacing(mesh_spec: dict, axis: str, *, key_candidates: list[str], default: float):
+    for candidate in key_candidates:
+        value = _axis_setting(mesh_spec, axis, candidate)
+        if value is not None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+    return default
+
+
+def _graded_axis(length: float,
+                 coarse: float,
+                 fine: float,
+                 spans: list[tuple[float, float]],
+                 falloff: float) -> np.ndarray:
+    """Return monotonically increasing coordinates from 0..length."""
+    length = float(length)
+    coarse = float(coarse)
+    fine = float(fine)
+    if coarse <= 0 or length <= 0:
+        raise ValueError("Domain length and coarse spacing must be positive")
+    fine = max(min(fine, coarse), 1e-6)
+    sample_count = max(1024, int(length / max(fine, 1e-6)) * 8)
+    xs = np.linspace(0.0, length, sample_count)
+    influence_total = np.zeros_like(xs)
+    falloff = max(float(falloff), 0.0)
+    if spans:
+        for start, end in spans:
+            s = max(0.0, min(length, float(start)))
+            e = max(0.0, min(length, float(end)))
+            if e <= s:
+                continue
+            dist = np.zeros_like(xs)
+            left_mask = xs < s
+            right_mask = xs > e
+            dist[left_mask] = s - xs[left_mask]
+            dist[right_mask] = xs[right_mask] - e
+            if falloff > 0:
+                influence = np.exp(-0.5 * (dist / falloff) ** 2)
+            else:
+                influence = (dist == 0.0).astype(float)
+            influence_total += influence
+        influence_total = np.clip(influence_total, 0.0, 1.0)
+    strength = max(coarse / fine - 1.0, 0.0)
+    relative_density = 1.0 + strength * influence_total
+    base_density = 1.0 / coarse
+    density = base_density * relative_density
+    cumulative = np.concatenate([[0.0], np.cumsum(0.5 * (density[1:] + density[:-1]) * np.diff(xs))])
+    total_cells = cumulative[-1]
+    n_cells = max(1, int(math.ceil(total_cells)))
+    targets = np.linspace(0.0, total_cells, n_cells + 1)
+    coords = np.interp(targets, cumulative, xs)
+    coords[0] = 0.0
+    coords[-1] = length
+    return coords
+
+
+def _build_adaptive_axes(grid: dict, definition: dict | None
+                        ) -> tuple[np.ndarray, np.ndarray, dict] | None:
+    mesh_spec = grid.get("mesh") or grid.get("meshing")
+    if not isinstance(mesh_spec, dict):
+        return None
+    if mesh_spec.get("enabled") is False:
+        return None
+    mesh_type = str(mesh_spec.get("type", "graded")).lower() or "graded"
+    if mesh_type != "graded":
+        return None
+    Lx = float(grid["Lx"])
+    Ly = float(grid["Ly"])
+    approx_Nx = int(grid.get("Nx", max(int(Lx / 0.01), 8)))
+    approx_Ny = int(grid.get("Ny", max(int(Ly / 0.01), 8)))
+    default_coarse_x = Lx / max(approx_Nx - 1, 1)
+    default_coarse_y = Ly / max(approx_Ny - 1, 1)
+    default_fine_x = default_coarse_x / 3.0
+    default_fine_y = default_coarse_y / 3.0
+
+    coarse_x = _axis_spacing(mesh_spec, "x", key_candidates=["coarse", "coarse_dx", "max_dx", "dx_far"], default=default_coarse_x)
+    coarse_y = _axis_spacing(mesh_spec, "y", key_candidates=["coarse", "coarse_dy", "max_dy", "dy_far"], default=default_coarse_y)
+    fine_x = _axis_spacing(mesh_spec, "x", key_candidates=["fine", "fine_dx", "min_dx", "dx_near"], default=default_fine_x)
+    fine_y = _axis_spacing(mesh_spec, "y", key_candidates=["fine", "fine_dy", "min_dy", "dy_near"], default=default_fine_y)
+
+    pad = float(mesh_spec.get("focus_pad", 0.0))
+    falloff = mesh_spec.get("focus_falloff")
+    if falloff is None:
+        falloff = 0.5 * pad if pad > 0 else 0.05 * min(Lx, Ly)
+    falloff = max(float(falloff), 0.0)
+    focus_materials = mesh_spec.get("focus_materials")
+    if focus_materials is None:
+        focus_materials = ["magnet", "steel", "wire"]
+    elif isinstance(focus_materials, (set, tuple)):
+        focus_materials = list(focus_materials)
+    elif isinstance(focus_materials, str):
+        focus_materials = [focus_materials]
+    focus_materials = [str(m).lower() for m in focus_materials]
+    manual_boxes = mesh_spec.get("focus_boxes")
+
+    spans_x = _collect_focus_spans(definition, "x", length=Lx,
+                                   materials=focus_materials,
+                                   pad=pad,
+                                   manual_boxes=manual_boxes if isinstance(manual_boxes, list) else None)
+    spans_y = _collect_focus_spans(definition, "y", length=Ly,
+                                   materials=focus_materials,
+                                   pad=pad,
+                                   manual_boxes=manual_boxes if isinstance(manual_boxes, list) else None)
+    x_coords = _graded_axis(Lx, coarse_x, fine_x, spans_x, falloff)
+    y_coords = _graded_axis(Ly, coarse_y, fine_y, spans_y, falloff)
+    meta = {
+        "type": mesh_type,
+        "x": {
+            "coarse": coarse_x,
+            "fine": fine_x,
+            "nodes": int(x_coords.size),
+            "focus_spans": spans_x,
+        },
+        "y": {
+            "coarse": coarse_y,
+            "fine": fine_y,
+            "nodes": int(y_coords.size),
+            "focus_spans": spans_y,
+        },
+        "focus_pad": pad,
+        "focus_falloff": falloff,
+        "focus_materials": focus_materials,
+    }
+    if manual_boxes:
+        meta["focus_boxes"] = manual_boxes
+    return x_coords, y_coords, meta
+
+def _safe_meta_copy(data):
+    try:
+        return json.loads(json.dumps(data))
+    except (TypeError, ValueError):
+        return data
+
+
 def build_fields(nodes, tris, LxLy,
                  include_magnet=True,
                  include_steel=True,
@@ -70,7 +377,9 @@ def build_fields(nodes, tris, LxLy,
                  mu_r_steel=1000.0,
                  wire_current=5000.0,     # A (per unit depth)
                  wire_radius=0.02,        # m
-                 seed=0):
+                 seed=0,
+                 grid_spec: dict | None = None,
+                 mesh_meta: dict | None = None):
     rng = np.random.default_rng(seed)
     Lx, Ly = LxLy
     Ne = tris.shape[0]
@@ -186,11 +495,18 @@ def build_fields(nodes, tris, LxLy,
         wire_radius=float(wire_radius),
         geometry=geometry,
     )
+    if grid_spec is not None:
+        meta["grid"] = _safe_meta_copy(grid_spec)
+    if mesh_meta is not None:
+        meta["mesh_generation"] = _safe_meta_copy(mesh_meta)
     return dict(nodes=nodes, tris=tris, region_id=region,
                 mu_r=mu_r, Mx=Mx, My=My, Jz=Jz, meta=meta)
 
 
-def build_fields_from_definition(nodes, tris, LxLy, definition, *, definition_source=None):
+def build_fields_from_definition(nodes, tris, LxLy, definition, *,
+                                 definition_source=None,
+                                 grid_spec: dict | None = None,
+                                 mesh_meta: dict | None = None):
     """Build material and source fields from a JSON case definition."""
     Lx, Ly = LxLy
     tri_area_vals = tri_areas(nodes, tris)
@@ -259,6 +575,10 @@ def build_fields_from_definition(nodes, tris, LxLy, definition, *, definition_so
     )
     if definition_source:
         meta["case_definition_source"] = str(definition_source)
+    if grid_spec is not None:
+        meta["grid"] = _safe_meta_copy(grid_spec)
+    if mesh_meta is not None:
+        meta["mesh_generation"] = _safe_meta_copy(mesh_meta)
 
     return dict(
         nodes=nodes,
@@ -567,9 +887,23 @@ def _grid_from_args(args: argparse.Namespace, definition: dict | None) -> dict:
     if definition and isinstance(definition, dict):
         overrides = definition.get("grid", {})
         if isinstance(overrides, dict):
-            for key in grid:
-                if key in overrides:
-                    grid[key] = type(grid[key])(overrides[key])
+            for key, value in overrides.items():
+                if key in {"Nx", "Ny"}:
+                    try:
+                        grid[key] = int(value)
+                    except (TypeError, ValueError):
+                        continue
+                elif key in {"Lx", "Ly"}:
+                    try:
+                        grid[key] = float(value)
+                    except (TypeError, ValueError):
+                        continue
+                else:
+                    grid[key] = value
+    grid["Nx"] = max(2, int(grid.get("Nx", 2)))
+    grid["Ny"] = max(2, int(grid.get("Ny", 2)))
+    grid["Lx"] = float(grid.get("Lx", 1.0))
+    grid["Ly"] = float(grid.get("Ly", 1.0))
     return grid
 
 
@@ -580,7 +914,27 @@ if __name__ == "__main__":
     case_definition = _load_case_definition(case_def_path) if case_def_path else None
 
     grid = _grid_from_args(args, case_definition)
-    nodes, tris, L = square_tri_mesh(Nx=grid["Nx"], Ny=grid["Ny"], Lx=grid["Lx"], Ly=grid["Ly"])
+    x_coords = y_coords = None
+    mesh_meta = None
+    try:
+        axes = _build_adaptive_axes(grid, case_definition)
+    except ValueError as exc:
+        raise SystemExit(f"Failed to build mesh coordinates: {exc}") from exc
+    else:
+        if axes is not None:
+            x_coords, y_coords, mesh_meta = axes
+            if isinstance(x_coords, np.ndarray):
+                grid["Nx"] = int(x_coords.size)
+            if isinstance(y_coords, np.ndarray):
+                grid["Ny"] = int(y_coords.size)
+    nodes, tris, L = square_tri_mesh(
+        Nx=grid["Nx"],
+        Ny=grid["Ny"],
+        Lx=grid["Lx"],
+        Ly=grid["Ly"],
+        x_coords=x_coords,
+        y_coords=y_coords,
+    )
 
     if case_definition:
         source = case_def_path
@@ -594,6 +948,8 @@ if __name__ == "__main__":
             (grid["Lx"], grid["Ly"]),
             case_definition,
             definition_source=str(source),
+            grid_spec=grid,
+            mesh_meta=mesh_meta,
         )
     else:
         payload = build_fields(
@@ -608,6 +964,8 @@ if __name__ == "__main__":
             mu_r_steel=args.mu_r_steel,
             wire_current=args.wire_current,
             wire_radius=args.wire_radius,
+            grid_spec=grid,
+            mesh_meta=mesh_meta,
         )
 
     outpath = _write_case(payload, case_dir)

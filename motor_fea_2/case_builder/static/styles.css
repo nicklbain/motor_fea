@@ -100,6 +100,40 @@ label {
   gap: 4px;
 }
 
+.grid-inputs {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.mesh-controls {
+  border-top: 1px solid #e4e8f3;
+  margin-top: 8px;
+  padding-top: 8px;
+}
+
+.mesh-controls .grid-inputs {
+  margin-bottom: 8px;
+}
+
+.mesh-materials {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 0.85rem;
+  align-items: center;
+}
+
+.mesh-materials span {
+  font-weight: 500;
+}
+
+.mesh-materials label {
+  flex-direction: row;
+  align-items: center;
+  margin-bottom: 0;
+}
+
 input, select, button {
   font: inherit;
 }

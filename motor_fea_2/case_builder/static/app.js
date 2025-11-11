@@ -1,4 +1,6 @@
 const bootstrap = window.__BOOTSTRAP__ || {};
+const BASE_GRID = bootstrap.defaultGrid || { Nx: 120, Ny: 120, Lx: 1, Ly: 1 };
+const DEFAULT_GRID_SANITIZED = sanitizeGrid(BASE_GRID, BASE_GRID);
 const MATERIAL_DEFAULTS = {
   magnet: { label: 'Permanent Magnet', color: '#e4572e', params: { mu_r: 1.05, Mx: 0, My: 800000 } },
   steel: { label: 'Steel', color: '#2e86de', params: { mu_r: 1000 } },
@@ -10,15 +12,17 @@ const state = {
   cases: bootstrap.cases || [],
   caseName: bootstrap.defaultCase || '',
   definitionName: '',
-  grid: sanitizeGrid(bootstrap.defaultGrid || { Nx: 120, Ny: 120, Lx: 1, Ly: 1 }),
+  grid: deepCopy(DEFAULT_GRID_SANITIZED),
   objects: [],
   selectedId: null,
   tool: 'select',
   dirty: false,
   status: '',
   view: null,
+  lastGradedMesh: null,
 };
 state.view = createDefaultView(state.grid);
+state.lastGradedMesh = state.grid.mesh?.type === 'graded' ? deepCopy(state.grid.mesh) : null;
 
 const elements = {};
 const canvasState = {
@@ -226,6 +230,18 @@ function cacheElements() {
   elements.gridNy = document.getElementById('gridNy');
   elements.gridLx = document.getElementById('gridLx');
   elements.gridLy = document.getElementById('gridLy');
+  elements.gridMeshMode = document.getElementById('gridMeshMode');
+  elements.gridFineX = document.getElementById('gridFineX');
+  elements.gridFineY = document.getElementById('gridFineY');
+  elements.gridCoarseX = document.getElementById('gridCoarseX');
+  elements.gridCoarseY = document.getElementById('gridCoarseY');
+  elements.gridFocusPad = document.getElementById('gridFocusPad');
+  elements.gridFocusFalloff = document.getElementById('gridFocusFalloff');
+  elements.meshFocusMagnet = document.getElementById('meshFocusMagnet');
+  elements.meshFocusSteel = document.getElementById('meshFocusSteel');
+  elements.meshFocusWire = document.getElementById('meshFocusWire');
+  elements.gradedMeshControls = document.getElementById('gradedMeshControls');
+  elements.uniformMeshControls = document.getElementById('uniformMeshControls');
   elements.toolButtons = Array.from(document.querySelectorAll('.tool-btn'));
   elements.shapeList = document.getElementById('shapeList');
   elements.deleteShapeBtn = document.getElementById('deleteShapeBtn');
@@ -306,10 +322,29 @@ function bindEvents() {
     state.definitionName = elements.definitionNameInput.value.trim();
     markDirty();
   });
-  ['Nx', 'Ny', 'Lx', 'Ly'].forEach((axis) => {
-    elements[`grid${axis}`].addEventListener('input', () => {
-      updateGridFromInputs();
-    });
+  const gridInputs = [
+    elements.gridLx,
+    elements.gridLy,
+    elements.gridFineX,
+    elements.gridFineY,
+    elements.gridCoarseX,
+    elements.gridCoarseY,
+    elements.gridFocusPad,
+    elements.gridFocusFalloff,
+    elements.gridNx,
+    elements.gridNy,
+  ].filter(Boolean);
+  gridInputs.forEach((input) => {
+    input.addEventListener('input', () => updateGridFromInputs());
+  });
+  if (elements.gridMeshMode) {
+    elements.gridMeshMode.addEventListener('change', () => updateGridFromInputs());
+  }
+  ['meshFocusMagnet', 'meshFocusSteel', 'meshFocusWire'].forEach((key) => {
+    const checkbox = elements[key];
+    if (checkbox) {
+      checkbox.addEventListener('change', () => updateGridFromInputs());
+    }
   });
   elements.toolButtons.forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -393,24 +428,150 @@ function renderAll() {
 }
 
 function updateGridInputs() {
+  const mesh = state.grid.mesh || {};
   elements.gridNx.value = state.grid.Nx;
   elements.gridNy.value = state.grid.Ny;
   elements.gridLx.value = state.grid.Lx;
   elements.gridLy.value = state.grid.Ly;
+  if (elements.gridMeshMode) {
+    elements.gridMeshMode.value = mesh.type === 'uniform' ? 'uniform' : 'graded';
+  }
+  if (elements.gridFineX) {
+    elements.gridFineX.value = mesh.fine ?? '';
+  }
+  if (elements.gridCoarseX) {
+    elements.gridCoarseX.value = mesh.coarse ?? '';
+  }
+  const meshY = mesh.y || {};
+  if (elements.gridFineY) {
+    elements.gridFineY.value = meshY.fine ?? '';
+  }
+  if (elements.gridCoarseY) {
+    elements.gridCoarseY.value = meshY.coarse ?? '';
+  }
+  if (elements.gridFocusPad) {
+    elements.gridFocusPad.value = mesh.focus_pad ?? '';
+  }
+  if (elements.gridFocusFalloff) {
+    elements.gridFocusFalloff.value = mesh.focus_falloff ?? '';
+  }
+  const focusMaterials = Array.isArray(mesh.focus_materials)
+    ? mesh.focus_materials
+    : ['magnet', 'steel', 'wire'];
+  if (mesh.type !== 'uniform') {
+    const focusSet = new Set(focusMaterials);
+    if (elements.meshFocusMagnet) {
+      elements.meshFocusMagnet.checked = focusSet.has('magnet');
+    }
+    if (elements.meshFocusSteel) {
+      elements.meshFocusSteel.checked = focusSet.has('steel');
+    }
+    if (elements.meshFocusWire) {
+      elements.meshFocusWire.checked = focusSet.has('wire');
+    }
+  } else {
+    const fallbackMaterials = Array.isArray(state.lastGradedMesh?.focus_materials)
+      ? state.lastGradedMesh.focus_materials
+      : ['magnet', 'steel', 'wire'];
+    const cachedSet = new Set(fallbackMaterials);
+    if (elements.meshFocusMagnet) {
+      elements.meshFocusMagnet.checked = cachedSet.has('magnet');
+    }
+    if (elements.meshFocusSteel) {
+      elements.meshFocusSteel.checked = cachedSet.has('steel');
+    }
+    if (elements.meshFocusWire) {
+      elements.meshFocusWire.checked = cachedSet.has('wire');
+    }
+  }
   elements.definitionNameInput.value = state.definitionName || '';
   elements.caseNameInput.value = state.caseName || '';
+  updateMeshModeVisibility();
 }
 
 function updateGridFromInputs() {
-  const Nx = Math.max(4, parseInt(elements.gridNx.value, 10) || state.grid.Nx);
-  const Ny = Math.max(4, parseInt(elements.gridNy.value, 10) || state.grid.Ny);
-  const Lx = Math.max(0.01, parseFloat(elements.gridLx.value) || state.grid.Lx);
-  const Ly = Math.max(0.01, parseFloat(elements.gridLy.value) || state.grid.Ly);
-  state.grid = { Nx, Ny, Lx, Ly };
+  const prevGrid = state.grid;
+  const mesh = prevGrid.mesh || {};
+  const mode = (elements.gridMeshMode?.value || mesh.type || 'graded') === 'uniform' ? 'uniform' : 'graded';
+  const Lx = Math.max(0.01, Number(elements.gridLx?.value) || prevGrid.Lx);
+  const Ly = Math.max(0.01, Number(elements.gridLy?.value) || prevGrid.Ly);
+  const focusBoxes = Array.isArray(mesh.focus_boxes) ? deepCopy(mesh.focus_boxes) : undefined;
+  let Nx = prevGrid.Nx;
+  let Ny = prevGrid.Ny;
+  let nextMesh = mesh;
+
+  if (mode === 'uniform') {
+    Nx = Math.max(4, parseInt(elements.gridNx?.value, 10) || prevGrid.Nx);
+    Ny = Math.max(4, parseInt(elements.gridNy?.value, 10) || prevGrid.Ny);
+    nextMesh = { type: 'uniform' };
+  } else {
+    const minDim = Math.max(Math.min(Lx, Ly), 0.01);
+    let fineX = readPositiveNumber(elements.gridFineX?.value, mesh.fine ?? minDim / 150, 1e-5) || minDim / 150;
+    let coarseX =
+      readPositiveNumber(elements.gridCoarseX?.value, mesh.coarse ?? minDim / 40, 1e-5) ||
+      Math.max(minDim / 40, fineX);
+    fineX = Math.min(fineX, coarseX);
+    let fineY = readPositiveNumber(elements.gridFineY?.value, mesh.y?.fine, 1e-5);
+    let coarseY = readPositiveNumber(elements.gridCoarseY?.value, mesh.y?.coarse, 1e-5);
+    if (fineY && coarseY) {
+      if (fineY > coarseY) fineY = coarseY;
+    } else if (coarseY && !fineY) {
+      fineY = Math.min(coarseY, fineX);
+    } else if (fineY && !coarseY) {
+      coarseY = Math.max(fineY, coarseX);
+    }
+    const focusPad = Math.max(0, Number(elements.gridFocusPad?.value) || mesh.focus_pad || 0.02 * minDim);
+    const focusFalloff = Math.max(
+      0,
+      Number(elements.gridFocusFalloff?.value) || mesh.focus_falloff || 0.5 * focusPad
+    );
+    const focusMaterials = [];
+    if (elements.meshFocusMagnet?.checked) focusMaterials.push('magnet');
+    if (elements.meshFocusSteel?.checked) focusMaterials.push('steel');
+    if (elements.meshFocusWire?.checked) focusMaterials.push('wire');
+
+    nextMesh = {
+      type: 'graded',
+      fine: fineX,
+      coarse: coarseX,
+      focus_pad: focusPad,
+      focus_falloff: focusFalloff,
+      focus_materials: focusMaterials,
+    };
+    if (fineY || coarseY) {
+      nextMesh.y = {};
+      if (fineY) nextMesh.y.fine = fineY;
+      if (coarseY) nextMesh.y.coarse = coarseY;
+    }
+    if (focusBoxes) {
+      nextMesh.focus_boxes = focusBoxes;
+    }
+    state.lastGradedMesh = deepCopy(nextMesh);
+  }
+
+  state.grid = {
+    ...prevGrid,
+    Nx,
+    Ny,
+    Lx,
+    Ly,
+    mesh: nextMesh,
+  };
   clampViewCenter();
   updateZoomLabel();
   markDirty();
+  updateMeshModeVisibility();
   scheduleDraw();
+}
+
+function updateMeshModeVisibility() {
+  const mode = state.grid.mesh?.type === 'uniform' ? 'uniform' : 'graded';
+  if (elements.gradedMeshControls) {
+    elements.gradedMeshControls.classList.toggle('hidden', mode === 'uniform');
+  }
+  if (elements.uniformMeshControls) {
+    elements.uniformMeshControls.classList.toggle('hidden', mode !== 'uniform');
+  }
 }
 
 function setActiveTool(tool) {
@@ -423,6 +584,8 @@ function setActiveTool(tool) {
 function newCase(name) {
   state.caseName = name;
   state.definitionName = name;
+  state.grid = deepCopy(DEFAULT_GRID_SANITIZED);
+  state.lastGradedMesh = state.grid.mesh?.type === 'graded' ? deepCopy(state.grid.mesh) : null;
   state.objects = [];
   state.selectedId = null;
   state.dirty = false;
@@ -445,7 +608,12 @@ async function loadCase(caseName) {
     const def = data.definition || {};
     state.caseName = data.case || caseName;
     state.definitionName = def.name || state.caseName;
-    state.grid = sanitizeGrid(def.grid || {});
+    state.grid = sanitizeGrid(def.grid || {}, BASE_GRID);
+    if (state.grid.mesh?.type === 'graded') {
+      state.lastGradedMesh = deepCopy(state.grid.mesh);
+    } else if (!state.lastGradedMesh && DEFAULT_GRID_SANITIZED.mesh?.type === 'graded') {
+      state.lastGradedMesh = deepCopy(DEFAULT_GRID_SANITIZED.mesh);
+    }
     state.objects = (def.objects || []).map((obj, idx) => hydrateObject(obj, idx));
     resetView({ schedule: false });
     state.selectedId = state.objects.length ? state.objects[0].id : null;
@@ -465,13 +633,89 @@ async function loadCase(caseName) {
   }
 }
 
-function sanitizeGrid(grid) {
-  return {
-    Nx: Math.max(4, parseInt(grid.Nx, 10) || 120),
-    Ny: Math.max(4, parseInt(grid.Ny, 10) || 120),
-    Lx: Math.max(0.01, parseFloat(grid.Lx) || 1.0),
-    Ly: Math.max(0.01, parseFloat(grid.Ly) || 1.0),
+function readPositiveNumber(value, fallback, min = 1e-5) {
+  const num = Number(value);
+  if (Number.isFinite(num) && num >= min) {
+    return num;
+  }
+  if (Number.isFinite(fallback) && fallback >= min) {
+    return fallback;
+  }
+  return null;
+}
+
+function sanitizeGrid(grid, fallback = BASE_GRID) {
+  const source = typeof grid === 'object' && grid !== null ? grid : {};
+  const fb = typeof fallback === 'object' && fallback !== null ? fallback : BASE_GRID;
+  const Nx = Math.max(4, parseInt(source.Nx ?? fb.Nx ?? 120, 10) || 120);
+  const Ny = Math.max(4, parseInt(source.Ny ?? fb.Ny ?? 120, 10) || 120);
+  const Lx = Math.max(0.01, parseFloat(source.Lx ?? fb.Lx ?? 1.0) || 1.0);
+  const Ly = Math.max(0.01, parseFloat(source.Ly ?? fb.Ly ?? 1.0) || 1.0);
+  const mesh = sanitizeMesh(source.mesh, fb.mesh);
+  return { Nx, Ny, Lx, Ly, mesh };
+}
+
+function sanitizeMesh(mesh, fallbackMesh = {}) {
+  const source = typeof mesh === 'object' && mesh !== null ? mesh : {};
+  const fallback = typeof fallbackMesh === 'object' && fallbackMesh !== null ? fallbackMesh : {};
+  const typeRaw =
+    typeof source.type === 'string'
+      ? source.type.toLowerCase()
+      : typeof fallback.type === 'string'
+      ? fallback.type.toLowerCase()
+      : 'graded';
+  const type = typeRaw === 'uniform' ? 'uniform' : 'graded';
+  if (type === 'uniform') {
+    return { type: 'uniform' };
+  }
+  const coarse = readPositiveNumber(
+    source.coarse ?? source.max_dx ?? fallback.coarse ?? fallback.max_dx ?? 0.02,
+    0.02
+  ) || 0.02;
+  const fineDefault = Math.min(coarse / 3, coarse);
+  const fine = readPositiveNumber(
+    source.fine ?? source.min_dx ?? fallback.fine ?? fallback.min_dx ?? fineDefault,
+    fineDefault
+  ) || fineDefault;
+  const ySource = source.y || {};
+  const yFallback = fallback.y || {};
+  const fineY = readPositiveNumber(ySource.fine ?? source.fine_y ?? yFallback.fine, null);
+  const coarseY = readPositiveNumber(ySource.coarse ?? source.coarse_y ?? yFallback.coarse, null);
+  const focusPad = Math.max(
+    0,
+    Number(source.focus_pad ?? fallback.focus_pad ?? 0.02) || 0.02
+  );
+  const focusFalloff = Math.max(
+    0,
+    Number(source.focus_falloff ?? fallback.focus_falloff ?? 0.5 * focusPad) || 0.5 * focusPad
+  );
+  const focusMaterialsRaw = Array.isArray(source.focus_materials)
+    ? source.focus_materials
+    : fallback.focus_materials;
+  const focusMaterials = Array.isArray(focusMaterialsRaw)
+    ? focusMaterialsRaw
+        .map((entry) => (typeof entry === 'string' ? entry.toLowerCase() : ''))
+        .filter((entry, idx, arr) => entry && arr.indexOf(entry) === idx)
+    : ['magnet', 'steel', 'wire'];
+  const meshSpec = {
+    type: 'graded',
+    fine,
+    coarse,
+    focus_pad: focusPad,
+    focus_falloff: focusFalloff,
+    focus_materials: focusMaterials,
   };
+  if (fineY || coarseY) {
+    meshSpec.y = {};
+    if (fineY) meshSpec.y.fine = fineY;
+    if (coarseY) meshSpec.y.coarse = coarseY;
+  }
+  if (Array.isArray(source.focus_boxes)) {
+    meshSpec.focus_boxes = deepCopy(source.focus_boxes);
+  } else if (Array.isArray(fallback.focus_boxes)) {
+    meshSpec.focus_boxes = deepCopy(fallback.focus_boxes);
+  }
+  return meshSpec;
 }
 
 function hydrateObject(raw, idx) {

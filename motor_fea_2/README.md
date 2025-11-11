@@ -66,7 +66,7 @@ Each case lives under `cases/<case_name>/`:
 | `--case <name>` | Case subfolder under `--cases-dir` (default: `mag2d_case`). |
 | `--cases-dir <path>` | Where case folders live (default: `cases`). |
 | `--case-config <file>` | Path to a JSON case definition. Defaults to `cases/<case>/case_definition.json` when present. |
-| `--Nx`, `--Ny` | Structured grid resolution (default: 100×100). |
+| `--Nx`, `--Ny` | Legacy uniform grid resolution (default: 100×100). Adaptive case definitions override this via `grid.mesh`. |
 | `--Lx`, `--Ly` | Domain size in meters. |
 | `--magnet-My` | Permanent magnet strength `My` in A/m (default: \(8\times10^5\)). |
 | `--mu-r-magnet`, `--mu-r-steel` | Override material permeabilities. |
@@ -116,12 +116,23 @@ python3 case_builder/app.py --debug
 python3 mesh_and_sources.py --case <your_case>
 ```
 
-Each saved definition looks like:
+Each saved definition includes the physical domain and the mesh controls so the solver can reproduce the exact grid:
 
 ```json
 {
   "name": "demo",
-  "grid": {"Nx": 120, "Ny": 120, "Lx": 0.4, "Ly": 0.3},
+  "grid": {
+    "Lx": 0.4,
+    "Ly": 0.3,
+    "mesh": {
+      "type": "graded",
+      "fine": 0.003,
+      "coarse": 0.015,
+      "focus_pad": 0.02,
+      "focus_falloff": 0.01,
+      "focus_materials": ["magnet", "steel", "wire"]
+    }
+  },
   "objects": [
     {
       "id": "magnet-1",
@@ -144,15 +155,24 @@ Fields that overlap get applied in list order, so later shapes win. Rectangles b
 
 Permanent magnet `params.Mx/My` are specified in the shape's local (unrotated) axes; if you set `shape.angle`, the magnetization vector is rotated by the same amount so the magnet's polarization stays aligned with the body.
 
+### Adaptive mesh controls
+
+The new **Adaptive mesh** mode lets you specify “fine” and “coarse” pitches (per-axis if needed), a padding distance, and which materials should trigger refinement. The mesher:
+
+1. Collects bounding boxes for the selected materials (magnets, steel, wires) plus any optional `focus_boxes`.
+2. Expands them by `focus_pad` and converts the union into 1-D spans along X/Y.
+3. Builds monotonic coordinate arrays whose local spacing transitions from `coarse` in far air to `fine` inside/near each span, using a Gaussian falloff to keep aspect ratios reasonable.
+
+Need a different vertical resolution or an extra manual hotspot? Add `grid.mesh.y = {"fine": ..., "coarse": ...}` and/or `grid.mesh.focus_boxes` directly in the JSON—the solver preserves those advanced knobs even if the UI can’t edit them yet.
+
+If you prefer the previous uniform grid, switch the UI to “Uniform (legacy Nx × Ny)” and the JSON will store `grid.mesh.type = "uniform"` plus the classic `Nx/Ny` counts.
+
+Every generated `.npz` now includes a `meta["mesh_generation"]` record (fine/coarse values, spans, etc.) so you can audit exactly how the mesh was derived.
+
 
 ## To do:
 
-- Don't mesh everywhere with the same density
 - Import DXFs to case builder
 - Verify ok if materials are touching each other
 - Add ability to draw rectangle, circle, or ring and use as loop for integrating Maxwell Stress tensor -> display Fx, Fy, torque per Z
-
-
-
-
 
