@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -90,23 +91,117 @@ def _field_stats(arr: np.ndarray) -> Dict[str, float]:
     return {"min": float(arr.min()), "max": float(arr.max())}
 
 
-def _load_b_field_payload(mesh_path: Path) -> tuple[Dict[str, Any], Dict[str, float]] | None:
+def _triangle_neighbors(tris: np.ndarray) -> list[list[int]]:
+    neighbors: list[list[int]] = [[] for _ in range(tris.shape[0])]
+    edges: dict[tuple[int, int], int] = {}
+    for idx, tri in enumerate(tris):
+        for corner in range(3):
+            a = int(tri[corner])
+            b = int(tri[(corner + 1) % 3])
+            if a > b:
+                a, b = b, a
+            key = (a, b)
+            other = edges.get(key)
+            if other is None:
+                edges[key] = idx
+            else:
+                neighbors[idx].append(other)
+                neighbors[other].append(idx)
+    return neighbors
+
+
+def _angle_diff(rad_a: float, rad_b: float) -> float:
+    diff = rad_a - rad_b
+    return abs(math.atan2(math.sin(diff), math.cos(diff)))
+
+
+def _field_gradient_components(
+    Bmag: np.ndarray,
+    Bx: np.ndarray,
+    By: np.ndarray,
+    centroids: np.ndarray,
+    neighbors: list[list[int]],
+) -> tuple[np.ndarray, np.ndarray]:
+    Ne = Bmag.shape[0]
+    mag_comp = np.zeros(Ne, dtype=float)
+    dir_comp = np.zeros(Ne, dtype=float)
+    angles = np.arctan2(By, Bx)
+    for idx in range(Ne):
+        c = centroids[idx]
+        best_mag = 0.0
+        best_dir = 0.0
+        for nb in neighbors[idx]:
+            dist = float(np.hypot(c[0] - centroids[nb, 0], c[1] - centroids[nb, 1]))
+            if dist <= 1e-12:
+                dist = 1e-12
+            best_mag = max(best_mag, abs(Bmag[idx] - Bmag[nb]) / dist)
+            angle_change = _angle_diff(angles[idx], angles[nb]) / dist
+            if math.isfinite(angle_change):
+                best_dir = max(best_dir, angle_change)
+        mag_comp[idx] = best_mag
+        dir_comp[idx] = best_dir
+    return mag_comp, dir_comp
+
+
+def _indicator_payload(
+    nodes: np.ndarray,
+    tris: np.ndarray,
+    Bmag: np.ndarray,
+    Bx: np.ndarray,
+    By: np.ndarray,
+) -> Dict[str, Any] | None:
+    if tris.ndim != 2 or tris.shape[1] != 3:
+        return None
+    if Bmag.shape[0] != tris.shape[0]:
+        return None
+    try:
+        centroids = nodes[tris].mean(axis=1)
+    except Exception:  # noqa: BLE001
+        return None
+    neighbors = _triangle_neighbors(tris)
+    mag_comp, dir_comp = _field_gradient_components(Bmag, Bx, By, centroids, neighbors)
+    combined = mag_comp + dir_comp
+    stats = {
+        "magnitude_min": float(np.min(mag_comp)),
+        "magnitude_max": float(np.max(mag_comp)),
+        "direction_min": float(np.min(dir_comp)),
+        "direction_max": float(np.max(dir_comp)),
+        "combined_min": float(np.min(combined)),
+        "combined_max": float(np.max(combined)),
+    }
+    return {
+        "magnitude": mag_comp.tolist(),
+        "direction": dir_comp.tolist(),
+        "combined": combined.tolist(),
+        "stats": stats,
+    }
+
+
+def _load_b_field_payload(mesh_path: Path) -> tuple[Dict[str, Any], Dict[str, float], Dict[str, np.ndarray]] | None:
     b_path = mesh_path.parent / "B_field.npz"
     if not b_path.exists():
         return None
     with np.load(b_path, allow_pickle=True) as data:
         if not {"Bx", "By", "Bmag"} <= set(data.files):
             return None
+        Bx = np.asarray(data["Bx"], dtype=float)
+        By = np.asarray(data["By"], dtype=float)
+        Bmag = np.asarray(data["Bmag"], dtype=float)
         payload: Dict[str, Any] = {
-            "Bx": data["Bx"].tolist(),
-            "By": data["By"].tolist(),
-            "Bmag": data["Bmag"].tolist(),
+            "Bx": Bx.tolist(),
+            "By": By.tolist(),
+            "Bmag": Bmag.tolist(),
             "source": b_path.name,
         }
         if "meta" in data:
             payload["meta"] = _json_ready_meta(data["meta"].item())
-        stats = _field_stats(data["Bmag"])
-    return payload, stats
+        if "contour_segments" in data:
+            payload["contour_segments"] = [dict(entry) for entry in data["contour_segments"].tolist()]
+        if "contour_totals" in data:
+            payload["contour_totals"] = [dict(entry) for entry in data["contour_totals"].tolist()]
+        stats = _field_stats(Bmag)
+    arrays = {"Bx": Bx, "By": By, "Bmag": Bmag}
+    return payload, stats, arrays
 
 
 def _load_mesh_payload(path: Path) -> Dict[str, Any]:
@@ -153,6 +248,21 @@ def _load_mesh_payload(path: Path) -> Dict[str, Any]:
         if b_field:
             payload["bField"] = b_field[0]
             field_stats["Bmag"] = b_field[1]
+            if "contour_segments" in b_field[0]:
+                payload["contours"] = {
+                    "segments": b_field[0].get("contour_segments", []),
+                    "totals": b_field[0].get("contour_totals", []),
+                }
+            indicator_info = _indicator_payload(
+                nodes,
+                tris,
+                b_field[2]["Bmag"],
+                b_field[2]["Bx"],
+                b_field[2]["By"],
+            )
+            if indicator_info:
+                payload["indicator"] = indicator_info
+                payload["summary"]["indicator_stats"] = indicator_info.get("stats")
 
         payload["summary"]["field_stats"] = field_stats
         if "meta" in data:

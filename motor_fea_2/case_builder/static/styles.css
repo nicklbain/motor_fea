@@ -144,11 +144,28 @@ input, select {
   border-radius: 4px;
 }
 
+label.inline {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+label.inline input[type="checkbox"] {
+  width: auto;
+}
+
 .button-row {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
   margin-bottom: 8px;
+}
+
+.rotate-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 8px;
 }
 
 button {

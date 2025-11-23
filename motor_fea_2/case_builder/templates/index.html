@@ -10,7 +10,7 @@
   <div class="app-shell">
     <header>
       <h1>Case Builder</h1>
-      <p>Sketch rectangles, circles, or rings, assign materials, and save the definition directly into a case folder.</p>
+      <p>Sketch rectangles, circles, rings, or regular polygons, assign materials (or mark a contour), and save the definition directly into a case folder.</p>
     </header>
     <main>
       <section class="controls">
@@ -37,7 +37,7 @@
             <label>Ly (m) <input id="gridLy" type="number" min="0.01" step="0.01"></label>
             <label>Mesh mode
               <select id="gridMeshMode">
-                <option value="graded">Adaptive (focus near materials)</option>
+                <option value="point_cloud">Adaptive (localized focus near materials)</option>
                 <option value="uniform">Uniform (legacy Nx × Ny)</option>
               </select>
             </label>
@@ -50,12 +50,38 @@
               <label>Coarse pitch Y (optional m) <input id="gridCoarseY" type="number" min="1e-4" step="0.001" placeholder="match X"></label>
               <label>Focus padding (m) <input id="gridFocusPad" type="number" min="0" step="0.001"></label>
               <label>Falloff (m) <input id="gridFocusFalloff" type="number" min="0" step="0.001"></label>
+              <label>Min triangle angle (deg) <input id="gridQualityAngle" type="number" min="0" max="60" step="1" value="28"></label>
             </div>
             <div class="mesh-materials">
               <span>Focus materials</span>
               <label><input type="checkbox" id="meshFocusMagnet"> Magnets</label>
               <label><input type="checkbox" id="meshFocusSteel"> Steel</label>
               <label><input type="checkbox" id="meshFocusWire"> Wires</label>
+            </div>
+            <div class="mesh-field-focus">
+              <span>B-field driven refinement</span>
+              <label><input type="checkbox" id="fieldFocusEnabled" checked> Use latest solution gradients</label>
+              <label>Direction weight
+                <input id="fieldDirectionWeight" type="number" min="0" step="0.1" value="1">
+              </label>
+              <label>Magnitude weight
+                <input id="fieldMagnitudeWeight" type="number" min="0" step="0.1" value="1">
+              </label>
+              <label>Indicator neutral (auto if blank)
+                <input id="fieldIndicatorNeutral" type="number" step="1e-6" placeholder="auto">
+              </label>
+              <label>Indicator gain
+                <input id="fieldIndicatorGain" type="number" min="0" step="0.1" value="1">
+              </label>
+              <label>Min spacing scale (× coarse)
+                <input id="fieldScaleMin" type="number" min="0.01" step="0.05" value="0.5">
+              </label>
+              <label>Max spacing scale (× coarse)
+                <input id="fieldScaleMax" type="number" min="0.01" step="0.05" value="2">
+              </label>
+              <label>Smoothing passes
+                <input id="fieldSmoothPasses" type="number" min="0" step="1" value="1">
+              </label>
             </div>
           </div>
           <div id="uniformMeshControls" class="mesh-controls">
@@ -73,8 +99,46 @@
             <button class="tool-btn" data-tool="rect">Draw Rectangle</button>
             <button class="tool-btn" data-tool="circle">Draw Circle</button>
             <button class="tool-btn" data-tool="ring">Draw Ring</button>
+            <button class="tool-btn" data-tool="polygon">Draw Polygon</button>
+            <button id="groupSelectedBtn" type="button">Create group</button>
+            <button id="rotateSelectedBtn" type="button">Rotate selection</button>
           </div>
-          <p class="hint">Tip: drag inside the canvas to place a shape. Use Select to drag existing shapes.</p>
+          <div class="rotate-controls">
+            <label>Angle (deg)
+              <input id="rotateAngle" type="number" step="0.1" value="0">
+            </label>
+            <label>Pivot
+              <select id="rotatePivot">
+                <option value="selection">Selection centroid</option>
+              </select>
+            </label>
+          </div>
+          <p class="hint">Tip: drag inside the canvas to place a shape. Use Select to drag existing shapes. Shift-click to multi-select; Rotate uses the angle + pivot shown.</p>
+        </div>
+        <div class="panel">
+          <h2>Import DXF</h2>
+          <label>DXF file
+            <input id="dxfFileInput" type="file" accept=".dxf">
+          </label>
+          <label>Material for import
+            <select id="dxfMaterialSelect">
+              <option value="magnet">Permanent Magnet</option>
+              <option value="steel">Steel</option>
+              <option value="wire">Wire / Current</option>
+              <option value="air">Air override</option>
+              <option value="contour">Contour (no material)</option>
+            </select>
+          </label>
+          <label class="inline" style="margin-top:6px;">
+            <input id="dxfDebugPoints" type="checkbox">
+            Debug: show DXF points/segments
+          </label>
+          <div class="button-row" style="margin-top:6px;">
+            <button id="buildDxfSolidBtn" type="button">Build solid from DXF</button>
+          </div>
+          <div id="dxfDebugPanel" class="debug-panel hidden">
+            <pre id="dxfDebugText" class="debug-text"></pre>
+          </div>
         </div>
         <div class="panel">
           <h2>Shapes</h2>
@@ -89,12 +153,17 @@
           <div id="inspectorEmpty">Select a shape to edit its properties.</div>
           <div id="inspectorFields" class="hidden">
             <label>Label <input id="shapeLabel" type="text"></label>
+            <label class="inline">
+              <input id="shapeGrouped" type="checkbox">
+              Grouped (clear to ungroup)
+            </label>
             <label>Material
               <select id="materialSelect">
                 <option value="magnet">Permanent Magnet</option>
                 <option value="steel">Steel</option>
                 <option value="wire">Wire / Current</option>
                 <option value="air">Air override</option>
+                <option value="contour">Contour (no material)</option>
               </select>
             </label>
             <fieldset>
@@ -116,6 +185,13 @@
                 <label>Center Y (m) <input id="ringCenterY" type="number" step="0.001"></label>
                 <label>Outer radius (m) <input id="ringOuterRadius" type="number" min="0" step="0.001"></label>
                 <label>Inner radius (m) <input id="ringInnerRadius" type="number" min="0" step="0.001"></label>
+              </div>
+              <div class="geom-fields" data-shape="polygon">
+                <label>Center X (m) <input id="polyCenterX" type="number" step="0.001"></label>
+                <label>Center Y (m) <input id="polyCenterY" type="number" step="0.001"></label>
+                <label>Radius (m) <input id="polyRadius" type="number" min="0" step="0.001"></label>
+                <label>Sides <input id="polySides" type="number" min="3" max="4096" step="1"></label>
+                <label>Rotation (deg) <input id="polyRotation" type="number" step="0.1"></label>
               </div>
             </fieldset>
             <fieldset>
@@ -142,6 +218,7 @@
           <div class="button-row">
             <button id="saveCaseBtn">Save to folder</button>
             <button id="runCaseBtn">Run case</button>
+            <button id="adaptiveRunBtn" disabled>Adaptive mesh re-run</button>
             <button id="downloadBtn">Download JSON</button>
           </div>
           <p id="statusLine" class="status"></p>

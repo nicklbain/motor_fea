@@ -29,6 +29,8 @@ DEFAULT_CASES_DIR = Path("cases")
 DEFAULT_CASE_NAME = "mag2d_case"
 DEFAULT_MESH_FILENAME = "mesh.npz"
 LEGACY_FLAT_FILENAME = "mag2d_case.npz"
+MU0 = 4e-7 * np.pi
+MAX_POLY_SIDES_EXPLICIT = 4096
 
 def load_case(path):
     data = np.load(path, allow_pickle=True)
@@ -58,8 +60,7 @@ def triangle_metrics(nodes: np.ndarray, tris: np.ndarray):
 
 def assemble_A_system(nodes, tris, region, mu_r, Mx, My, Jz):
     """Build sparse K and RHS f for -div(nu grad A) = Jz + curl(M)_z + edge(M×n̂)."""
-    mu0 = 4e-7 * np.pi
-    nu_elem = 1.0 / (mu0 * mu_r)    # per element
+    nu_elem = 1.0 / (MU0 * mu_r)    # per element
     Nn = nodes.shape[0]
     Ne = tris.shape[0]
     T = tris
@@ -182,6 +183,185 @@ def compute_triangle_B(nodes: np.ndarray, tris: np.ndarray, Az: np.ndarray):
     return Bx, By, np.hypot(Bx, By)
 
 
+def _regular_polygon_vertices(cx: float, cy: float, radius: float, sides: int, rotation_deg: float):
+    if not (radius > 0.0) or sides < 3:
+        return []
+    sides = int(max(3, sides))
+    angles = np.linspace(0.0, 2 * np.pi, sides, endpoint=False) + np.radians(rotation_deg)
+    verts = []
+    for ang in angles:
+        verts.append([cx + radius * np.cos(ang), cy + radius * np.sin(ang)])
+    return verts
+
+
+def _point_in_triangle(px: float, py: float, tri_pts: np.ndarray) -> bool:
+    ax, ay = tri_pts[0]
+    bx, by = tri_pts[1]
+    cx, cy = tri_pts[2]
+    v0x, v0y = cx - ax, cy - ay
+    v1x, v1y = bx - ax, by - ay
+    v2x, v2y = px - ax, py - ay
+    dot00 = v0x * v0x + v0y * v0y
+    dot01 = v0x * v1x + v0y * v1y
+    dot02 = v0x * v2x + v0y * v2y
+    dot11 = v1x * v1x + v1y * v1y
+    dot12 = v1x * v2x + v1y * v2y
+    denom = dot00 * dot11 - dot01 * dot01
+    if abs(denom) < 1e-18:
+        return False
+    inv = 1.0 / denom
+    u = (dot11 * dot02 - dot01 * dot12) * inv
+    v = (dot00 * dot12 - dot01 * dot02) * inv
+    return u >= -1e-10 and v >= -1e-10 and (u + v) <= 1.0 + 1e-10
+
+
+def _sample_B_at_point(px: float,
+                       py: float,
+                       nodes: np.ndarray,
+                       tris: np.ndarray,
+                       Bx: np.ndarray,
+                       By: np.ndarray,
+                       *,
+                       centroids: np.ndarray) -> tuple[float, float, float, int]:
+    """Return (Bx, By, |B|, tri_index) at a point using containing triangle or nearest centroid."""
+    tri_pts = nodes[tris]  # (Ne,3,2)
+    for idx, pts in enumerate(tri_pts):
+        if _point_in_triangle(px, py, pts):
+            bx = float(Bx[idx])
+            by = float(By[idx])
+            return bx, by, float(np.hypot(bx, by)), idx
+    # fallback to nearest centroid
+    dx = centroids[:, 0] - px
+    dy = centroids[:, 1] - py
+    nearest = int(np.argmin(dx * dx + dy * dy))
+    bx = float(Bx[nearest])
+    by = float(By[nearest])
+    return bx, by, float(np.hypot(bx, by)), nearest
+
+
+def _contour_vertices_from_shape(shape: dict) -> list[list[float]]:
+    stype = str(shape.get("type", "")).lower()
+    center = shape.get("center", [0.0, 0.0])
+    if isinstance(center, dict):
+        cx = float(center.get("x", 0.0))
+        cy = float(center.get("y", 0.0))
+    elif isinstance(center, (list, tuple)) and len(center) >= 2:
+        cx, cy = float(center[0]), float(center[1])
+    else:
+        cx = cy = 0.0
+    if stype == "polygon":
+        radius = float(shape.get("radius", 0.0))
+        sides = int(shape.get("sides", 3))
+        rotation = float(shape.get("rotation", shape.get("angle", 0.0)))
+        sides = min(max(3, sides), MAX_POLY_SIDES_EXPLICIT)
+        return _regular_polygon_vertices(cx, cy, radius, sides, rotation)
+    if stype == "circle":
+        radius = float(shape.get("radius", 0.0))
+        if not (radius > 0.0):
+            return []
+        sides = min(MAX_POLY_SIDES_EXPLICIT, 256)
+        return _regular_polygon_vertices(cx, cy, radius, sides, 0.0)
+    if stype == "rect":
+        width = float(shape.get("width", 0.0))
+        height = float(shape.get("height", 0.0))
+        angle = float(shape.get("angle", 0.0))
+        if not (width > 0.0 and height > 0.0):
+            return []
+        half_w = 0.5 * width
+        half_h = 0.5 * height
+        corners = np.array([
+            [half_w, half_h],
+            [half_w, -half_h],
+            [-half_w, -half_h],
+            [-half_w, half_h],
+        ])
+        if angle:
+            ang = np.radians(angle)
+            rot = np.array([[np.cos(ang), -np.sin(ang)], [np.sin(ang), np.cos(ang)]])
+            corners = corners @ rot.T
+        corners += np.array([cx, cy])
+        return corners.tolist()
+    return []
+
+
+def _compute_contour_forces(meta: dict[str, object],
+                            nodes: np.ndarray,
+                            tris: np.ndarray,
+                            Bx: np.ndarray,
+                            By: np.ndarray) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    contours = []
+    if isinstance(meta, dict):
+        raw = meta.get("contours")
+        if isinstance(raw, list):
+            contours = raw
+    if not contours:
+        return [], []
+    centroids = nodes[tris].mean(axis=1) if tris.size else np.zeros((0, 2), dtype=float)
+    segments: list[dict[str, object]] = []
+    totals: list[dict[str, object]] = []
+    for c_idx, contour in enumerate(contours):
+        if not isinstance(contour, dict):
+            continue
+        shape = contour.get("shape") if isinstance(contour.get("shape"), dict) else contour.get("shape") or contour
+        verts = _contour_vertices_from_shape(shape or {})
+        if len(verts) < 3:
+            continue
+        center = np.mean(np.asarray(verts), axis=0)
+        total_force = np.zeros(2, dtype=float)
+        total_torque = 0.0
+        for s_idx in range(len(verts)):
+            a = np.asarray(verts[s_idx])
+            b = np.asarray(verts[(s_idx + 1) % len(verts)])
+            mid = 0.5 * (a + b)
+            length = float(np.hypot(*(b - a)))
+            if length <= 0.0:
+                continue
+            bx, by, bmag, tri_idx = _sample_B_at_point(mid[0], mid[1], nodes, tris, Bx, By, centroids=centroids)
+            b2 = bx * bx + by * by
+            # Maxwell stress tensor traction: t = (1/mu0)*(B B^T - 0.5|B|^2 I) · n
+            normal = mid - center
+            n_norm = float(np.hypot(normal[0], normal[1]))
+            if n_norm == 0.0:
+                tangent = b - a
+                normal = np.array([tangent[1], -tangent[0]])
+                n_norm = float(np.hypot(normal[0], normal[1]))
+            nx, ny = (normal / max(n_norm, 1e-12)).tolist()
+            t_x = (bx * bx * nx + bx * by * ny - 0.5 * b2 * nx) / MU0
+            t_y = (bx * by * nx + by * by * ny - 0.5 * b2 * ny) / MU0
+            fx = t_x * length
+            fy = t_y * length
+            total_force[0] += fx
+            total_force[1] += fy
+            lever = mid - center
+            torque_z = lever[0] * fy - lever[1] * fx  # r × F (out of plane)
+            total_torque += torque_z
+            segments.append({
+                "contour_index": c_idx,
+                "contour_id": contour.get("id"),
+                "contour_label": contour.get("label"),
+                "segment_index": s_idx,
+                "p0": a.tolist(),
+                "p1": b.tolist(),
+                "mid": mid.tolist(),
+                "length": length,
+                "normal": [nx, ny],
+                "B": [bx, by],
+                "Bmag": bmag,
+                "traction": [t_x, t_y],
+                "force": [fx, fy],
+                "torque": torque_z,
+                "tri_index": int(tri_idx),
+            })
+        totals.append({
+            "contour_index": c_idx,
+            "contour_id": contour.get("id"),
+            "contour_label": contour.get("label"),
+            "net_force": total_force.tolist(),
+            "net_torque": float(total_torque),
+        })
+    return segments, totals
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Solve Az for a generated case",
@@ -239,7 +419,10 @@ def _write_solution_files(case_mesh_path: Path,
                           Bx: np.ndarray,
                           By: np.ndarray,
                           Bmag: np.ndarray,
-                          meta: dict[str, object]):
+                          meta: dict[str, object],
+                          *,
+                          contour_segments: list[dict[str, object]] | None = None,
+                          contour_totals: list[dict[str, object]] | None = None):
     case_dir = case_mesh_path.parent
     case_dir.mkdir(parents=True, exist_ok=True)
     az_path = case_dir / "Az_field.npz"
@@ -247,10 +430,16 @@ def _write_solution_files(case_mesh_path: Path,
                         region_id=region, mu_r=mu_r, meta=meta)
 
     b_path = case_dir / "B_field.npz"
-    np.savez_compressed(b_path,
-                        Bx=Bx, By=By, Bmag=Bmag,
-                        tris=tris, nodes=nodes,
-                        region_id=region, mu_r=mu_r, meta=meta)
+    payload = dict(
+        Bx=Bx, By=By, Bmag=Bmag,
+        tris=tris, nodes=nodes,
+        region_id=region, mu_r=mu_r, meta=meta,
+    )
+    if contour_segments is not None:
+        payload["contour_segments"] = np.array(contour_segments, dtype=object)
+    if contour_totals is not None:
+        payload["contour_totals"] = np.array(contour_totals, dtype=object)
+    np.savez_compressed(b_path, **payload)
     return az_path, b_path
 
 if __name__ == "__main__":
@@ -261,8 +450,17 @@ if __name__ == "__main__":
     K, f = assemble_A_system(nodes, tris, region, mu_r, Mx, My, Jz)
     Az = solve_neumann_pinned(K, f, pin_node=args.pin_node)
     Bx, By, Bmag = compute_triangle_B(nodes, tris, Az)
+    contour_segments, contour_totals = _compute_contour_forces(meta, nodes, tris, Bx, By)
     az_path, b_path = _write_solution_files(mesh_path, nodes, tris, region,
-                                            mu_r, Az, Bx, By, Bmag, meta)
+                                            mu_r, Az, Bx, By, Bmag, meta,
+                                            contour_segments=contour_segments or None,
+                                            contour_totals=contour_totals or None)
     print(f"Solved A_z on {nodes.shape[0]} nodes (tris={tris.shape[0]})")
     print(f"  A_z range: [{Az.min():.6g}, {Az.max():.6g}]  -> {az_path}")
     print(f"  |B| range: [{Bmag.min():.6g}, {Bmag.max():.6g}]  -> {b_path}")
+    if contour_totals:
+        for entry in contour_totals:
+            label = entry.get("contour_label") or f"contour {entry.get('contour_index')}"
+            fx, fy = entry.get("net_force", [0.0, 0.0])
+            torque = entry.get("net_torque", 0.0)
+            print(f"  Net force on {label}: Fx={fx:.6g} N/m, Fy={fy:.6g} N/m, Torque={torque:.6g} N·m/m")

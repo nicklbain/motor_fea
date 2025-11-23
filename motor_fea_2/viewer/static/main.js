@@ -16,13 +16,19 @@ const layerBmagToggle = document.getElementById("layer-bmag");
 const layerBvecToggle = document.getElementById("layer-bvec");
 const bmagScaleSelect = document.getElementById("bmag-scale");
 const bmagScaleControl = document.getElementById("bmag-scale-control");
+const layerContourBToggle = document.getElementById("layer-contour-b");
+const layerContourForceToggle = document.getElementById("layer-contour-force");
 
 const state = {
   mesh: null,
   edges: [],
   caseName: null,
   bField: null,
+  indicator: null,
+  contours: { segments: [], totals: [] },
   centroids: [],
+  neighbors: [],
+  indicatorStats: null,
   designShapes: [],
   viewport: { width: 0, height: 0 },
   view: {
@@ -41,6 +47,8 @@ const state = {
     bMagnitude: false,
     bVectors: false,
     targetShapes: false,
+    contourB: false,
+    contourForce: false,
   },
   bMagnitudeScale: "log",
   dragging: false,
@@ -70,6 +78,9 @@ const SELECTED_CELL_FILL = "rgba(255, 64, 129, 0.2)";
 const TARGET_MAGNET_COLOR = "#c56b1a";
 const TARGET_STEEL_COLOR = "#4b5563";
 const TARGET_WIRE_COLOR = "#a62019";
+const TARGET_CONTOUR_COLOR = "#111827";
+const CONTOUR_B_COLOR = "#0f766e";
+const CONTOUR_FORCE_COLOR = "#b45309";
 const B_MAG_MIN_COLOR = { r: 230, g: 244, b: 255 };
 const B_MAG_MAX_COLOR = { r: 178, g: 24, b: 43 };
 const JFREE_NEG_COLOR = { r: 33, g: 94, b: 189 };
@@ -242,6 +253,9 @@ async function loadMesh(caseName, options = {}) {
     state.mesh = mesh;
     state.bField = prepareBField(mesh.bField);
     state.designShapes = extractDesignShapes(mesh.meta);
+    state.contours = mesh.contours || { segments: [], totals: [] };
+    state.indicator = mesh.indicator || null;
+    state.indicatorStats = mesh.summary?.indicator_stats || null;
     if (state.bMagnitudeScale === "log" && !state.bField?.logExtent) {
       state.bMagnitudeScale = "linear";
       if (bmagScaleSelect) {
@@ -250,6 +264,7 @@ async function loadMesh(caseName, options = {}) {
     }
     state.caseName = caseName;
     state.edges = buildEdges(mesh.tris || []);
+    state.neighbors = buildNeighbors(mesh.tris || []);
     state.centroids = computeCentroids(mesh.nodes || [], mesh.tris || []);
     if (
       preserveSelection &&
@@ -284,6 +299,7 @@ async function loadMesh(caseName, options = {}) {
     const message = error?.message || String(error);
     showOverlay("Failed to load mesh.");
     updateStatus(`Error: ${message}`);
+    state.contours = { segments: [], totals: [] };
     emitViewerEvent("caseLoadFailed", { caseName, error: message });
     return null;
   }
@@ -311,6 +327,42 @@ function buildEdges(tris) {
     }
   }
   return edges;
+}
+
+function buildNeighbors(tris) {
+  if (!Array.isArray(tris)) {
+    return [];
+  }
+  const neighbors = tris.map(() => []);
+  const edgeOwners = new Map();
+  tris.forEach((tri, idx) => {
+    if (!Array.isArray(tri) || tri.length !== 3) {
+      return;
+    }
+    const pairs = [
+      [tri[0], tri[1]],
+      [tri[1], tri[2]],
+      [tri[2], tri[0]],
+    ];
+    pairs.forEach(([a, b]) => {
+      const i = Number(a);
+      const j = Number(b);
+      if (!Number.isFinite(i) || !Number.isFinite(j)) {
+        return;
+      }
+      const key = i < j ? `${i}-${j}` : `${j}-${i}`;
+      if (edgeOwners.has(key)) {
+        const other = edgeOwners.get(key);
+        if (other !== idx) {
+          neighbors[idx].push(other);
+          neighbors[other].push(idx);
+        }
+      } else {
+        edgeOwners.set(key, idx);
+      }
+    });
+  });
+  return neighbors;
 }
 
 function computeCentroids(nodes, tris) {
@@ -384,6 +436,8 @@ function render() {
   drawJfreeHeatmap();
   drawEdges();
   drawTargetGeometry();
+  drawContourB();
+  drawContourForces();
   drawMagnetization();
   drawBFieldVectors();
   drawSelectedCellOutline();
@@ -400,6 +454,32 @@ function updateSummary(mesh) {
   const formatRange = (label, data) =>
     data ? `${label}: ${data.min.toFixed(3)} – ${data.max.toFixed(3)}` : "";
 
+  const indicatorStats = summary.indicator_stats || state.indicatorStats || null;
+  const indicatorLines = indicatorStats
+    ? `Magnitude indicator: ${formatNumber(indicatorStats.magnitude_min)} – ${formatNumber(
+        indicatorStats.magnitude_max
+      )}<br/>Direction indicator: ${formatNumber(indicatorStats.direction_min)} – ${formatNumber(
+        indicatorStats.direction_max
+      )}<br/>Combined: ${formatNumber(indicatorStats.combined_min)} – ${formatNumber(
+        indicatorStats.combined_max
+      )}`
+    : "";
+  const contourTotals = state.contours?.totals || [];
+  const contourSummary = contourTotals.length
+    ? contourTotals
+        .map((entry) => {
+          const label = entry.contour_label || `Contour ${entry.contour_index}`;
+          const fx = entry.net_force?.[0] ?? 0;
+          const fy = entry.net_force?.[1] ?? 0;
+          const torque = entry.net_torque ?? 0;
+          return `${label}: Fx=${formatNumber(fx, 4)} N/m, Fy=${formatNumber(
+            fy,
+            4
+          )} N/m, τ=${formatNumber(torque, 4)} N·m/m`;
+        })
+        .join("<br/>")
+    : "None";
+
   summaryContent.innerHTML = `
     <dl>
       <dt>Nodes / Elements</dt>
@@ -412,8 +492,11 @@ function updateSummary(mesh) {
         ${formatRange("μ_r", stats.mu_r) || "μ_r: n/a"}<br/>
         ${formatRange("|M|", stats.M_mag) || "|M|: n/a"}<br/>
         ${formatRange("J_z", stats.Jz) || "J_z: n/a"}<br/>
-        ${formatRange("|B|", stats.Bmag) || "|B|: n/a"}
+        ${formatRange("|B|", stats.Bmag) || "|B|: n/a"}<br/>
+        ${indicatorLines || "Indicator: n/a"}
       </dd>
+      <dt>Contours</dt>
+      <dd>${contourSummary}</dd>
     </dl>
   `;
 }
@@ -479,6 +562,34 @@ function updateCellInfo(cellIndex) {
   if (Number.isFinite(jz)) {
     jLines.push(`${formatNumber(jz)} A/m²`);
   }
+  const indicatorData = state.indicator || {};
+  const indicatorLines = [];
+  const magIndicator = valueAt(indicatorData.magnitude, cellIndex);
+  const dirIndicator = valueAt(indicatorData.direction, cellIndex);
+  const combinedIndicator = valueAt(indicatorData.combined, cellIndex);
+  if (Number.isFinite(combinedIndicator)) {
+    indicatorLines.push(`Combined = ${formatNumber(combinedIndicator, 4)}`);
+  }
+  if (Number.isFinite(magIndicator)) {
+    indicatorLines.push(`Magnitude = ${formatNumber(magIndicator, 4)} 1/m`);
+  }
+  if (Number.isFinite(dirIndicator)) {
+    indicatorLines.push(`Direction = ${formatNumber(dirIndicator, 4)} 1/m`);
+  }
+  const neighborLines = [];
+  const neighborList =
+    Array.isArray(state.neighbors?.[cellIndex]) && state.neighbors[cellIndex]
+      ? state.neighbors[cellIndex]
+      : [];
+  neighborList.forEach((nb) => {
+    const nbCombined = valueAt(indicatorData.combined, nb);
+    if (Number.isFinite(nbCombined)) {
+      neighborLines.push(`#${nb}: ${formatNumber(nbCombined, 4)}`);
+    }
+  });
+  if (neighborLines.length) {
+    indicatorLines.push(`Neighbors → ${neighborLines.join(", ")}`);
+  }
 
   cellInfoContent.innerHTML = `
     <dl>
@@ -494,6 +605,8 @@ function updateCellInfo(cellIndex) {
       <dd>${materialLines.join("<br/>") || "n/a"}</dd>
       <dt>J<sub>z</sub></dt>
       <dd>${jLines.join("<br/>") || "n/a"}</dd>
+      <dt>Indicator (weights=1)</dt>
+      <dd>${indicatorLines.join("<br/>") || "n/a"}</dd>
     </dl>
   `;
 }
@@ -518,6 +631,11 @@ function syncLayerAvailability() {
   setToggleAvailability(layerBmagToggle, "bMagnitude", hasB);
   setToggleAvailability(layerBvecToggle, "bVectors", hasB);
   setToggleAvailability(layerMeshToggle, "meshLines", true);
+  const hasContours =
+    Array.isArray(state.contours?.segments) &&
+    state.contours.segments.length > 0;
+  setToggleAvailability(layerContourBToggle, "contourB", hasContours);
+  setToggleAvailability(layerContourForceToggle, "contourForce", hasContours);
   const hasTargets = Array.isArray(state.designShapes) && state.designShapes.length > 0;
   setToggleAvailability(layerTargetToggle, "targetShapes", hasTargets);
   if (bmagScaleSelect) {
@@ -645,6 +763,27 @@ function normalizeDesignShape(entry, fallbackRole = "magnet") {
       return null;
     }
     return { type: "circle", center, radius, role };
+  }
+  if (type === "polygon") {
+    const radius = firstFiniteNumber(
+      shapeDef.radius,
+      shapeDef.size && typeof shapeDef.size === "object" ? shapeDef.size.radius : null,
+      typeof shapeDef.size === "number" ? shapeDef.size : null
+    );
+    let sides = Math.round(
+      firstFiniteNumber(shapeDef.sides, shapeDef.n, entry.sides, entry.n, 6)
+    );
+    if (!Number.isFinite(sides)) {
+      sides = 6;
+    }
+    sides = Math.max(3, Math.min(4096, sides));
+    if (!(radius > 0) || sides < 3) {
+      return null;
+    }
+    const rotation = normalizeAngleDegrees(
+      firstFiniteNumber(shapeDef.rotation, entry.rotation, shapeDef.angle, entry.angle, 0)
+    );
+    return { type: "polygon", center, radius, sides, rotation, role };
   }
   if (type === "ring") {
     const outer = firstFiniteNumber(
@@ -820,6 +959,8 @@ function drawTargetGeometry() {
       drawDesignCircle(shape);
     } else if (shape.type === "ring") {
       drawDesignRing(shape);
+    } else if (shape.type === "polygon") {
+      drawDesignPolygon(shape);
     }
   }
   ctx.restore();
@@ -831,9 +972,27 @@ function designStrokeColor(role) {
       return TARGET_STEEL_COLOR;
     case "wire":
       return TARGET_WIRE_COLOR;
+    case "contour":
+      return TARGET_CONTOUR_COLOR;
     default:
       return TARGET_MAGNET_COLOR;
   }
+}
+
+function regularPolygonVertices(center, radius, sides, rotationDeg = 0) {
+  if (!Array.isArray(center) || center.length < 2 || !(radius > 0) || sides < 3) {
+    return [];
+  }
+  const verts = [];
+  const rotationRad = (rotationDeg * Math.PI) / 180;
+  for (let i = 0; i < sides; i += 1) {
+    const theta = rotationRad + (i * 2 * Math.PI) / sides;
+    verts.push([
+      center[0] + radius * Math.cos(theta),
+      center[1] + radius * Math.sin(theta),
+    ]);
+  }
+  return verts;
 }
 
 function drawDesignRect(shape) {
@@ -897,6 +1056,29 @@ function drawDesignRing(shape) {
   if (inner > 0) {
     drawDesignCircle({ center: shape.center, radius: inner });
   }
+}
+
+function drawDesignPolygon(shape) {
+  const sides = Math.max(3, Math.round(shape.sides || 0));
+  const radius = shape.radius ?? 0;
+  if (!(radius > 0) || sides < 3) {
+    return;
+  }
+  const vertsWorld = regularPolygonVertices(
+    shape.center,
+    radius,
+    sides,
+    shape.rotation ?? shape.angle ?? 0
+  );
+  if (!vertsWorld.length) return;
+  const verts = vertsWorld.map(([x, y]) => worldToScreen(x, y));
+  ctx.beginPath();
+  verts.forEach((pt, idx) => {
+    if (idx === 0) ctx.moveTo(pt.x, pt.y);
+    else ctx.lineTo(pt.x, pt.y);
+  });
+  ctx.closePath();
+  ctx.stroke();
 }
 
 function materialColor(regionId, jzValue, threshold) {
@@ -1099,6 +1281,89 @@ function drawBFieldVectors() {
   ctx.restore();
 }
 
+function drawContourB() {
+  if (!state.layers.contourB) return;
+  const segments = state.contours?.segments || [];
+  if (!segments.length) return;
+  const bounds = state.mesh?.bounds || { minX: 0, maxX: 1, minY: 0, maxY: 1 };
+  const domainDiag = Math.hypot(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY);
+  const maxB = Math.max(
+    ...segments.map((seg) => {
+      const mag = typeof seg.Bmag === "number" ? seg.Bmag : null;
+      if (Number.isFinite(mag)) return Math.abs(mag);
+      if (Array.isArray(seg.B) && seg.B.length >= 2) return Math.hypot(seg.B[0], seg.B[1]);
+      return 0;
+    }),
+    0
+  );
+  if (!(maxB > 0)) return;
+  const baseLength = domainDiag * 0.045;
+  ctx.save();
+  ctx.strokeStyle = CONTOUR_B_COLOR;
+  ctx.fillStyle = CONTOUR_B_COLOR;
+  ctx.lineWidth = 1.2;
+  for (const seg of segments) {
+    const mid = seg.mid;
+    const vec = seg.B || [];
+    const bx = Number(vec[0] ?? 0);
+    const by = Number(vec[1] ?? 0);
+    const mag = Number.isFinite(seg.Bmag) ? Math.abs(seg.Bmag) : Math.hypot(bx, by);
+    if (!(mag > 0) || !Array.isArray(mid) || mid.length < 2) continue;
+    const scale = (mag / maxB) * baseLength;
+    const dirX = bx / mag;
+    const dirY = by / mag;
+    const start = worldToScreen(mid[0], mid[1]);
+    const end = worldToScreen(mid[0] + dirX * scale, mid[1] + dirY * scale);
+    ctx.beginPath();
+    ctx.moveTo(start.x, start.y);
+    ctx.lineTo(end.x, end.y);
+    ctx.stroke();
+    drawArrowHead(end, start);
+  }
+  ctx.restore();
+}
+
+function drawContourForces() {
+  if (!state.layers.contourForce) return;
+  const segments = state.contours?.segments || [];
+  if (!segments.length) return;
+  const bounds = state.mesh?.bounds || { minX: 0, maxX: 1, minY: 0, maxY: 1 };
+  const domainDiag = Math.hypot(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY);
+  const maxF = Math.max(
+    ...segments.map((seg) => {
+      const f = seg.force || [];
+      if (Array.isArray(f) && f.length >= 2) return Math.hypot(f[0], f[1]);
+      return 0;
+    }),
+    0
+  );
+  if (!(maxF > 0)) return;
+  const baseLength = domainDiag * 0.06;
+  ctx.save();
+  ctx.strokeStyle = CONTOUR_FORCE_COLOR;
+  ctx.fillStyle = CONTOUR_FORCE_COLOR;
+  ctx.lineWidth = 1.4;
+  for (const seg of segments) {
+    const mid = seg.mid;
+    const f = seg.force || [];
+    const fx = Number(f[0] ?? 0);
+    const fy = Number(f[1] ?? 0);
+    const mag = Math.hypot(fx, fy);
+    if (!(mag > 0) || !Array.isArray(mid) || mid.length < 2) continue;
+    const scale = (mag / maxF) * baseLength;
+    const dirX = fx / mag;
+    const dirY = fy / mag;
+    const start = worldToScreen(mid[0], mid[1]);
+    const end = worldToScreen(mid[0] + dirX * scale, mid[1] + dirY * scale);
+    ctx.beginPath();
+    ctx.moveTo(start.x, start.y);
+    ctx.lineTo(end.x, end.y);
+    ctx.stroke();
+    drawArrowHead(end, start);
+  }
+  ctx.restore();
+}
+
 function drawSelectedCellOutline() {
   const index = state.selectedCellIndex;
   if (index === null || index === undefined || index < 0) {
@@ -1274,6 +1539,16 @@ layerBmagToggle?.addEventListener("change", () => {
 
 layerBvecToggle?.addEventListener("change", () => {
   state.layers.bVectors = layerBvecToggle.checked;
+  render();
+});
+
+layerContourBToggle?.addEventListener("change", () => {
+  state.layers.contourB = layerContourBToggle.checked;
+  render();
+});
+
+layerContourForceToggle?.addEventListener("change", () => {
+  state.layers.contourForce = layerContourForceToggle.checked;
   render();
 });
 

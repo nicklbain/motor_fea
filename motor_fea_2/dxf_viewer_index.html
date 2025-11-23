@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DXF Point + Segment Viewer</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #111827;
+      --accent: #38bdf8;
+      --muted: #94a3b8;
+      --text: #e2e8f0;
+      --warn: #fbbf24;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", -apple-system, system-ui, sans-serif;
+      background: radial-gradient(circle at 20% 20%, rgba(56,189,248,0.07), transparent 30%),
+                  radial-gradient(circle at 80% 0%, rgba(56,189,248,0.08), transparent 25%),
+                  var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    header {
+      padding: 24px 28px 12px;
+    }
+    h1 {
+      margin: 0 0 6px;
+      font-size: 26px;
+      letter-spacing: -0.02em;
+    }
+    p.lead {
+      margin: 0;
+      color: var(--muted);
+      max-width: 880px;
+    }
+    main {
+      padding: 0 28px 40px;
+      display: grid;
+      grid-template-columns: 1.35fr 1fr;
+      gap: 16px;
+    }
+    @media (max-width: 1100px) {
+      main { grid-template-columns: 1fr; }
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid rgba(148,163,184,0.1);
+      border-radius: 12px;
+      padding: 16px;
+      box-shadow: 0 18px 40px rgba(0,0,0,0.3);
+    }
+    .card h2 {
+      margin: 0 0 10px;
+      font-size: 17px;
+      letter-spacing: -0.01em;
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin: 10px 0 0;
+    }
+    label.input {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border: 1px dashed rgba(148,163,184,0.35);
+      border-radius: 10px;
+      cursor: pointer;
+      color: var(--muted);
+      font-size: 14px;
+      transition: border-color 0.2s ease, color 0.2s ease;
+    }
+    label.input:hover {
+      color: var(--text);
+      border-color: var(--accent);
+    }
+    input[type="file"] { display: none; }
+    button {
+      background: linear-gradient(135deg, #22d3ee, #0ea5e9);
+      color: #0b1223;
+      border: none;
+      padding: 10px 14px;
+      border-radius: 10px;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 8px 20px rgba(14,165,233,0.35);
+      transition: transform 0.15s ease, box-shadow 0.15s ease;
+    }
+    button:hover { transform: translateY(-1px); box-shadow: 0 12px 24px rgba(14,165,233,0.45); }
+    button.secondary {
+      background: rgba(148,163,184,0.16);
+      color: var(--text);
+      box-shadow: none;
+    }
+    .status {
+      margin-top: 10px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    canvas {
+      width: 100%;
+      height: auto;
+      background: #0b1223;
+      border: 1px solid rgba(148,163,184,0.15);
+      border-radius: 10px;
+    }
+    .summary {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin: 12px 0;
+    }
+    .pill {
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: rgba(56,189,248,0.12);
+      color: var(--text);
+      font-size: 13px;
+      border: 1px solid rgba(56,189,248,0.3);
+    }
+    .flex {
+      display: flex;
+      gap: 10px;
+    }
+    .column {
+      flex: 1;
+      min-width: 260px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      color: var(--text);
+    }
+    th, td {
+      border-bottom: 1px solid rgba(148,163,184,0.12);
+      text-align: left;
+      padding: 6px 4px;
+    }
+    th { color: var(--muted); font-weight: 600; }
+    .scroll {
+      max-height: 320px;
+      overflow: auto;
+      border: 1px solid rgba(148,163,184,0.12);
+      border-radius: 10px;
+      padding: 6px;
+      background: rgba(15,23,42,0.6);
+    }
+    code {
+      background: rgba(148,163,184,0.16);
+      padding: 2px 5px;
+      border-radius: 6px;
+      font-size: 12px;
+    }
+    .warning { color: var(--warn); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>DXF Geometry Explorer</h1>
+    <p class="lead">Upload the provided DXF (or any ASCII DXF) to extract points and how they connect (lines, arcs, circles). The canvas shows all points as dots and traces the segments in order.</p>
+    <div class="controls">
+      <label class="input">
+        <input type="file" id="fileInput" accept=".dxf,.DXF">
+        Choose DXF…
+      </label>
+      <button id="loadSample" type="button">Load bundled Motor_stator_v2_45mm.DXF</button>
+      <button id="clear" class="secondary" type="button">Clear</button>
+    </div>
+    <div class="status" id="status">Waiting for a DXF…</div>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>Canvas Preview</h2>
+      <canvas id="view" width="980" height="700"></canvas>
+      <div class="summary" id="summary"></div>
+    </section>
+    <section class="card">
+      <h2>Points & Connections</h2>
+      <div class="flex">
+        <div class="column">
+          <h3 style="margin:6px 0;">Points</h3>
+          <div class="scroll">
+            <table id="pointsTable">
+              <thead><tr><th>#</th><th>X</th><th>Y</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="column">
+          <h3 style="margin:6px 0;">Segments</h3>
+          <div class="scroll">
+            <table id="segmentsTable">
+              <thead><tr><th>#</th><th>Type</th><th>Start</th><th>End</th><th>Extra</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const statusEl = document.getElementById("status");
+    const pointsTable = document.querySelector("#pointsTable tbody");
+    const segmentsTable = document.querySelector("#segmentsTable tbody");
+    const summaryEl = document.getElementById("summary");
+    const canvas = document.getElementById("view");
+    const ctx = canvas.getContext("2d");
+    const DEFAULT_FILE = "Motor_stator_v2_45mm.DXF";
+
+    document.getElementById("fileInput").addEventListener("change", (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      readFile(file);
+    });
+
+    document.getElementById("loadSample").addEventListener("click", async () => {
+      try {
+        setStatus("Fetching bundled DXF…");
+        const res = await fetch(DEFAULT_FILE);
+        if (!res.ok) throw new Error("Could not load bundled DXF (run from a simple server)");
+        const text = await res.text();
+        hydrate(text, DEFAULT_FILE);
+      } catch (err) {
+        setStatus(err.message, true);
+      }
+    });
+
+    document.getElementById("clear").addEventListener("click", () => {
+      pointsTable.innerHTML = "";
+      segmentsTable.innerHTML = "";
+      summaryEl.innerHTML = "";
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      setStatus("Cleared. Choose or load a DXF to begin.");
+    });
+
+    function readFile(file) {
+      const reader = new FileReader();
+      reader.onload = () => hydrate(reader.result, file.name);
+      reader.onerror = () => setStatus("Failed to read file", true);
+      reader.readAsText(file);
+    }
+
+    function hydrate(text, name) {
+      try {
+        const geometry = parseDXF(text);
+        setStatus(`Parsed ${name}: ${geometry.points.length} points, ${geometry.segments.length} segments.`);
+        renderTables(geometry);
+        drawGeometry(geometry);
+        renderSummary(geometry, name);
+      } catch (err) {
+        console.error(err);
+        setStatus(err.message || "Parsing error", true);
+      }
+    }
+
+    function setStatus(msg, warn = false) {
+      statusEl.textContent = msg;
+      statusEl.classList.toggle("warning", warn);
+    }
+
+    function parseDXF(text) {
+      const pairs = [];
+      const raw = text.replace(/\r\n/g, "\n").split(/\n/);
+      for (let i = 0; i < raw.length - 1; i += 2) {
+        pairs.push([raw[i].trim(), raw[i + 1].trim()]);
+      }
+
+      let inEntities = false;
+      const segments = [];
+      const points = [];
+      const pointIndex = new Map();
+      const bounds = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+
+      const addPoint = (x, y) => {
+        const key = x.toFixed(6) + "," + y.toFixed(6);
+        let idx = pointIndex.get(key);
+        if (idx === undefined) {
+          idx = points.length;
+          points.push({ id: points.length + 1, x, y });
+          pointIndex.set(key, idx);
+        }
+        includeInBounds(x, y);
+        return idx;
+      };
+
+      const includeInBounds = (x, y) => {
+        bounds.minX = Math.min(bounds.minX, x);
+        bounds.maxX = Math.max(bounds.maxX, x);
+        bounds.minY = Math.min(bounds.minY, y);
+        bounds.maxY = Math.max(bounds.maxY, y);
+      };
+
+      const parseEntity = (type, startIdx) => {
+        const data = {};
+        let i = startIdx + 1;
+        for (; i < pairs.length; i++) {
+          const [code, value] = pairs[i];
+          if (code === "0") break;
+          data[code] = value;
+        }
+        if (type === "LINE") {
+          const sx = parseFloat(data["10"]);
+          const sy = parseFloat(data["20"]);
+          const ex = parseFloat(data["11"]);
+          const ey = parseFloat(data["21"]);
+          if (Number.isFinite(sx) && Number.isFinite(sy) && Number.isFinite(ex) && Number.isFinite(ey)) {
+            const a = addPoint(sx, sy);
+            const b = addPoint(ex, ey);
+            segments.push({ type: "LINE", start: a, end: b });
+          }
+        } else if (type === "ARC") {
+          const cx = parseFloat(data["10"]);
+          const cy = parseFloat(data["20"]);
+          const r = parseFloat(data["40"]);
+          const startAngle = parseFloat(data["50"]);
+          const endAngle = parseFloat(data["51"]);
+          if ([cx, cy, r, startAngle, endAngle].every(Number.isFinite)) {
+            includeInBounds(cx - r, cy - r);
+            includeInBounds(cx + r, cy + r);
+            const startPt = polarPoint(cx, cy, r, startAngle);
+            const endPt = polarPoint(cx, cy, r, endAngle);
+            const a = addPoint(startPt.x, startPt.y);
+            const b = addPoint(endPt.x, endPt.y);
+            segments.push({ type: "ARC", start: a, end: b, center: { x: cx, y: cy }, radius: r, startAngle, endAngle });
+          }
+        } else if (type === "CIRCLE") {
+          const cx = parseFloat(data["10"]);
+          const cy = parseFloat(data["20"]);
+          const r = parseFloat(data["40"]);
+          if ([cx, cy, r].every(Number.isFinite)) {
+            includeInBounds(cx - r, cy - r);
+            includeInBounds(cx + r, cy + r);
+            const startPt = polarPoint(cx, cy, r, 0);
+            const a = addPoint(startPt.x, startPt.y);
+            segments.push({ type: "CIRCLE", start: a, end: a, center: { x: cx, y: cy }, radius: r, startAngle: 0, endAngle: 360 });
+          }
+        }
+        return i;
+      };
+
+      for (let i = 0; i < pairs.length; i++) {
+        const [code, value] = pairs[i];
+        if (code === "0" && value === "SECTION" && pairs[i + 1]?.[1] === "ENTITIES") {
+          inEntities = true;
+          i += 1;
+          continue;
+        }
+        if (code === "0" && value === "ENDSEC" && inEntities) {
+          inEntities = false;
+        }
+        if (!inEntities || code !== "0") continue;
+        i = parseEntity(value, i) - 1; // parser returns next index
+      }
+
+      if (points.length === 0) {
+        throw new Error("No LINE/ARC/CIRCLE entities found in ENTITIES section.");
+      }
+      return { points, segments, bounds };
+    }
+
+    function polarPoint(cx, cy, r, deg) {
+      const rad = (deg * Math.PI) / 180;
+      return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
+    }
+
+    function renderTables({ points, segments }) {
+      pointsTable.innerHTML = points.map((p) => `<tr><td>${p.id}</td><td>${p.x.toFixed(5)}</td><td>${p.y.toFixed(5)}</td></tr>`).join("");
+      segmentsTable.innerHTML = segments
+        .map((s, idx) => {
+          const start = points[s.start];
+          const end = points[s.end];
+          let extra = "";
+          if (s.type === "ARC" || s.type === "CIRCLE") {
+            extra = `center=(${s.center.x.toFixed(3)}, ${s.center.y.toFixed(3)}), r=${s.radius.toFixed(3)}`;
+          }
+          return `<tr><td>${idx + 1}</td><td>${s.type}</td><td>${fmtPt(start)}</td><td>${fmtPt(end)}</td><td>${extra}</td></tr>`;
+        })
+        .join("");
+    }
+
+    function fmtPt(pt) {
+      return `(${pt.x.toFixed(3)}, ${pt.y.toFixed(3)})`;
+    }
+
+    function renderSummary({ points, segments }, name) {
+      summaryEl.innerHTML = `
+        <span class="pill">File: ${name}</span>
+        <span class="pill">${points.length} unique points</span>
+        <span class="pill">${segments.length} segments</span>
+        <span class="pill">Types: ${segmentCounts(segments).join(", ")}</span>
+      `;
+    }
+
+    function segmentCounts(segments) {
+      const tally = segments.reduce((acc, s) => {
+        acc[s.type] = (acc[s.type] || 0) + 1;
+        return acc;
+      }, {});
+      return Object.entries(tally).map(([k, v]) => `${v} ${k}`);
+    }
+
+    function drawGeometry({ points, segments, bounds }) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const pad = 20;
+      const spanX = bounds.maxX - bounds.minX || 1;
+      const spanY = bounds.maxY - bounds.minY || 1;
+      const scale = Math.min((canvas.width - pad * 2) / spanX, (canvas.height - pad * 2) / spanY);
+
+      const toCanvas = (x, y) => {
+        const cx = (x - bounds.minX) * scale + pad;
+        const cy = canvas.height - ((y - bounds.minY) * scale + pad); // invert y for screen coords
+        return [cx, cy];
+      };
+
+      // subtle grid
+      drawGrid(bounds, toCanvas, scale);
+
+      // draw segments first
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "rgba(56,189,248,0.8)";
+      segments.forEach((s) => {
+        if (s.type === "LINE") {
+          const a = points[s.start];
+          const b = points[s.end];
+          const [sx, sy] = toCanvas(a.x, a.y);
+          const [ex, ey] = toCanvas(b.x, b.y);
+          ctx.beginPath();
+          ctx.moveTo(sx, sy);
+          ctx.lineTo(ex, ey);
+          ctx.stroke();
+        } else if (s.type === "ARC" || s.type === "CIRCLE") {
+          const samples = sampleArc(points[s.start], points[s.end], s);
+          ctx.beginPath();
+          samples.forEach((pt, idx) => {
+            const [x, y] = toCanvas(pt.x, pt.y);
+            if (idx === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          });
+          ctx.stroke();
+        }
+      });
+
+      // draw points
+      ctx.fillStyle = "#f87171";
+      points.forEach((p) => {
+        const [x, y] = toCanvas(p.x, p.y);
+        ctx.beginPath();
+        ctx.arc(x, y, 3, 0, Math.PI * 2);
+        ctx.fill();
+      });
+    }
+
+    function drawGrid(bounds, toCanvas, scale) {
+      const steps = 10;
+      const sizeX = (bounds.maxX - bounds.minX) / steps;
+      const sizeY = (bounds.maxY - bounds.minY) / steps;
+      ctx.strokeStyle = "rgba(148,163,184,0.15)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let i = 0; i <= steps; i++) {
+        const x = bounds.minX + i * sizeX;
+        const [sx, sy] = toCanvas(x, bounds.minY);
+        const [ex, ey] = toCanvas(x, bounds.maxY);
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(ex, ey);
+      }
+      for (let j = 0; j <= steps; j++) {
+        const y = bounds.minY + j * sizeY;
+        const [sx, sy] = toCanvas(bounds.minX, y);
+        const [ex, ey] = toCanvas(bounds.maxX, y);
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(ex, ey);
+      }
+      ctx.stroke();
+
+      // origin marker
+      const [ox, oy] = toCanvas(0, 0);
+      ctx.strokeStyle = "rgba(56,189,248,0.6)";
+      ctx.beginPath();
+      ctx.moveTo(ox - 12, oy);
+      ctx.lineTo(ox + 12, oy);
+      ctx.moveTo(ox, oy - 12);
+      ctx.lineTo(ox, oy + 12);
+      ctx.stroke();
+    }
+
+    function sampleArc(startPt, endPt, seg) {
+      const start = normalizeAngle(seg.startAngle);
+      const end = normalizeAngle(seg.endAngle);
+      let span = end - start;
+      if (span <= 0) span += 360;
+      const steps = Math.max(12, Math.ceil(span / 6));
+      const points = [];
+      for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
+        const deg = start + span * t;
+        points.push(polarPoint(seg.center.x, seg.center.y, seg.radius, deg));
+      }
+      return points;
+    }
+
+    function normalizeAngle(deg) {
+      let d = deg % 360;
+      if (d < 0) d += 360;
+      return d;
+    }
+  </script>
+</body>
+</html>
