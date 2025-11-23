@@ -1073,6 +1073,11 @@ def build_fields_from_definition(nodes, tris, LxLy, definition, *,
         if not isinstance(obj, dict):
             continue
         material = str(obj.get("material", "air")).lower()
+        if material == "contour":
+            # Contour-only shapes are kept for post-processing but never affect fields,
+            # so skip any overlap/area computations that scale with polygon sides.
+            geometry.append(obj)
+            continue
         shape = obj.get("shape") or {}
         params = obj.get("params") or {}
         min_fill = float(obj.get("min_fill", 0.5))

@@ -23,6 +23,7 @@ from pathlib import Path
 import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
+from scipy.spatial import cKDTree
 
 AIR, PMAG, STEEL = 0, 1, 2
 DEFAULT_CASES_DIR = Path("cases")
@@ -215,25 +216,67 @@ def _point_in_triangle(px: float, py: float, tri_pts: np.ndarray) -> bool:
     return u >= -1e-10 and v >= -1e-10 and (u + v) <= 1.0 + 1e-10
 
 
+def _build_triangle_lookup(nodes: np.ndarray,
+                           tris: np.ndarray) -> tuple[np.ndarray, np.ndarray, cKDTree | None]:
+    """Precompute triangle points/centroids and a KD-tree for spatial lookup."""
+    if tris.size == 0:
+        return np.zeros((0, 3, 2), dtype=float), np.zeros((0, 2), dtype=float), None
+    tri_pts = nodes[tris]  # (Ne,3,2)
+    centroids = tri_pts.mean(axis=1)
+    try:
+        tree = cKDTree(centroids)
+    except Exception:
+        tree = None
+    return tri_pts, centroids, tree
+
+
 def _sample_B_at_point(px: float,
                        py: float,
-                       nodes: np.ndarray,
-                       tris: np.ndarray,
+                       tri_pts: np.ndarray,
+                       centroids: np.ndarray,
+                       tree: cKDTree | None,
                        Bx: np.ndarray,
                        By: np.ndarray,
                        *,
-                       centroids: np.ndarray) -> tuple[float, float, float, int]:
-    """Return (Bx, By, |B|, tri_index) at a point using containing triangle or nearest centroid."""
-    tri_pts = nodes[tris]  # (Ne,3,2)
-    for idx, pts in enumerate(tri_pts):
-        if _point_in_triangle(px, py, pts):
-            bx = float(Bx[idx])
-            by = float(By[idx])
-            return bx, by, float(np.hypot(bx, by)), idx
-    # fallback to nearest centroid
-    dx = centroids[:, 0] - px
-    dy = centroids[:, 1] - py
-    nearest = int(np.argmin(dx * dx + dy * dy))
+                       initial_k: int = 12) -> tuple[float, float, float, int]:
+    """
+    Return (Bx, By, |B|, tri_index) at a point using a KD-tree to limit triangle tests.
+    Falls back to nearest centroid if no containing triangle is found.
+    """
+    num_tris = tri_pts.shape[0]
+    if num_tris == 0:
+        return 0.0, 0.0, 0.0, -1
+
+    if tree is not None:
+        k = min(max(1, initial_k), num_tris)
+        _, idxs = tree.query([px, py], k=k)
+        if np.isscalar(idxs):
+            idxs = [int(idxs)]
+        else:
+            idxs = [int(i) for i in np.atleast_1d(idxs)]
+        for idx in idxs:
+            if _point_in_triangle(px, py, tri_pts[idx]):
+                bx = float(Bx[idx])
+                by = float(By[idx])
+                return bx, by, float(np.hypot(bx, by)), idx
+
+        nearest_dist, nearest_idx = tree.query([px, py], k=1)
+        search_radii = [nearest_dist * factor + 1e-12 for factor in (1.5, 3.0, 6.0)]
+        for radius in search_radii:
+            if not np.isfinite(radius):
+                continue
+            candidates = tree.query_ball_point([px, py], r=radius)
+            for idx in candidates:
+                if _point_in_triangle(px, py, tri_pts[idx]):
+                    bx = float(Bx[idx])
+                    by = float(By[idx])
+                    return bx, by, float(np.hypot(bx, by)), idx
+        nearest = int(nearest_idx)
+    else:
+        dx = centroids[:, 0] - px
+        dy = centroids[:, 1] - py
+        nearest = int(np.argmin(dx * dx + dy * dy))
+
     bx = float(Bx[nearest])
     by = float(By[nearest])
     return bx, by, float(np.hypot(bx, by)), nearest
@@ -296,7 +339,7 @@ def _compute_contour_forces(meta: dict[str, object],
             contours = raw
     if not contours:
         return [], []
-    centroids = nodes[tris].mean(axis=1) if tris.size else np.zeros((0, 2), dtype=float)
+    tri_pts, centroids, tree = _build_triangle_lookup(nodes, tris)
     segments: list[dict[str, object]] = []
     totals: list[dict[str, object]] = []
     for c_idx, contour in enumerate(contours):
@@ -316,7 +359,9 @@ def _compute_contour_forces(meta: dict[str, object],
             length = float(np.hypot(*(b - a)))
             if length <= 0.0:
                 continue
-            bx, by, bmag, tri_idx = _sample_B_at_point(mid[0], mid[1], nodes, tris, Bx, By, centroids=centroids)
+            bx, by, bmag, tri_idx = _sample_B_at_point(mid[0], mid[1],
+                                                      tri_pts, centroids, tree,
+                                                      Bx, By)
             b2 = bx * bx + by * by
             # Maxwell stress tensor traction: t = (1/mu0)*(B B^T - 0.5|B|^2 I) · n
             normal = mid - center

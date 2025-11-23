@@ -26,6 +26,7 @@ const state = {
   lastRunSnapshot: null,
   runBusy: false,
   adaptiveBusy: false,
+  runStartedAt: null,
   debug: {
     showDxfPoints: false,
     previewPoints: null,
@@ -73,6 +74,29 @@ function deepCopy(value) {
 
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
+}
+
+function formatDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  const seconds = ms / 1000;
+  if (seconds < 60) {
+    return seconds < 10 ? `${seconds.toFixed(2)}s` : `${seconds.toFixed(1)}s`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  const rem = seconds % 60;
+  const remStr = rem < 10 ? rem.toFixed(1).padStart(4, '0') : rem.toFixed(1);
+  return `${minutes}m ${remStr}s`;
+}
+
+function startRunTimer() {
+  state.runStartedAt = performance.now();
+}
+
+function stopRunTimer() {
+  if (state.runStartedAt === null) return null;
+  const elapsedMs = performance.now() - state.runStartedAt;
+  state.runStartedAt = null;
+  return elapsedMs;
 }
 
 function createDefaultView(grid) {
@@ -3096,6 +3120,7 @@ async function runCasePipeline() {
   const fingerprint = fingerprintDefinition(definition);
   setRunButtonBusy(true);
   setStatus('Saving case and running pipeline...', 'info');
+  startRunTimer();
   emitBuilderEvent('runStarted', { caseName, definition });
   try {
     const response = await fetch(`/api/case/${encodeURIComponent(caseName)}/run`, {
@@ -3132,21 +3157,33 @@ async function runCasePipeline() {
       renderCaseSelect();
     }
     const summary = summarizeSteps(data.steps);
-    setStatus(summary ? `Run complete (${summary}).` : 'Run complete.', 'success');
+    const elapsedMs = stopRunTimer();
+    const elapsedLabel = formatDuration(elapsedMs);
+    const suffixParts = [];
+    if (summary) suffixParts.push(summary);
+    if (elapsedLabel) suffixParts.push(`elapsed ${elapsedLabel}`);
+    const suffix = suffixParts.length ? ` (${suffixParts.join(' · ')})` : '';
+    setStatus(`Run complete${suffix}.`, 'success');
     emitBuilderEvent('runCompleted', {
       caseName: state.caseName,
       succeeded: true,
       steps: data.steps || [],
+      durationMs: elapsedMs ?? undefined,
     });
   } catch (err) {
     console.error(err);
-    setStatus(`Run failed: ${err.message || err}`, 'error');
+    const elapsedMs = stopRunTimer();
+    const elapsedLabel = formatDuration(elapsedMs);
+    const timing = elapsedLabel ? ` after ${elapsedLabel}` : '';
+    setStatus(`Run failed${timing}: ${err.message || err}`, 'error');
     emitBuilderEvent('runCompleted', {
       caseName: state.caseName || caseName,
       succeeded: false,
       error: err.message || String(err),
+      durationMs: elapsedMs ?? undefined,
     });
   } finally {
+    stopRunTimer();
     setRunButtonBusy(false);
   }
 }
@@ -3166,6 +3203,7 @@ async function runAdaptivePipeline() {
   setAdaptiveButtonBusy(true);
   const { definition, fingerprint } = readiness;
   setStatus('Sampling ∇B from the last solve, rebuilding the mesh, and re-solving...', 'info');
+  startRunTimer();
   emitBuilderEvent('adaptiveRunStarted', { caseName, definition });
   try {
     const response = await fetch(`/api/case/${encodeURIComponent(caseName)}/run-adaptive`, {
@@ -3199,21 +3237,30 @@ async function runAdaptivePipeline() {
     updateAdaptiveButtonState();
     const summary = summarizeSteps(data.steps);
     const suffix = summary ? ` (${summary})` : '';
-    setStatus(`Adaptive run complete${suffix}.`, 'success');
+    const elapsedMs = stopRunTimer();
+    const elapsedLabel = formatDuration(elapsedMs);
+    const timing = elapsedLabel ? ` · elapsed ${elapsedLabel}` : '';
+    setStatus(`Adaptive run complete${suffix}${timing}.`, 'success');
     emitBuilderEvent('adaptiveRunCompleted', {
       caseName: state.caseName,
       succeeded: true,
       steps: data.steps || [],
+      durationMs: elapsedMs ?? undefined,
     });
   } catch (err) {
     console.error(err);
-    setStatus(`Adaptive run failed: ${err.message || err}`, 'error');
+    const elapsedMs = stopRunTimer();
+    const elapsedLabel = formatDuration(elapsedMs);
+    const timing = elapsedLabel ? ` after ${elapsedLabel}` : '';
+    setStatus(`Adaptive run failed${timing}: ${err.message || err}`, 'error');
     emitBuilderEvent('adaptiveRunCompleted', {
       caseName: state.caseName || caseName,
       succeeded: false,
       error: err.message || String(err),
+      durationMs: elapsedMs ?? undefined,
     });
   } finally {
+    stopRunTimer();
     setAdaptiveButtonBusy(false);
     setRunButtonBusy(false);
   }
