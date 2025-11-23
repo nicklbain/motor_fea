@@ -1470,7 +1470,7 @@ def _clip_polygon_to_edge(vertices: list[list[float]],
         r2x, r2y = p2[0], p2[1]
         dx = r2x - r1x
         dy = r2y - r1y
-        denom = ex * dy - ey * dx
+        denom = dx * ey - dy * ex
         if abs(denom) < eps:
             return None
         t = ((edge_start[0] - r1x) * ey - (edge_start[1] - r1y) * ex) / denom
@@ -1500,6 +1500,19 @@ def _clip_polygon_to_edge(vertices: list[list[float]],
     return out
 
 
+def _clip_polygon_to_triangle(vertices: list[list[float]],
+                              tri_pts: np.ndarray) -> list[list[float]]:
+    """Clip an arbitrary polygon against a (convex) triangle."""
+    clipped = vertices
+    for k in range(3):
+        a = tri_pts[k].tolist()
+        b = tri_pts[(k + 1) % 3].tolist()
+        clipped = _clip_polygon_to_edge(clipped, a, b)
+        if len(clipped) < 3:
+            break
+    return clipped
+
+
 def polygon_overlap_fraction_vertices(nodes,
                                       tris,
                                       vertices: list[list[float]],
@@ -1514,21 +1527,26 @@ def polygon_overlap_fraction_vertices(nodes,
         if len(verts) < 3:
             return np.zeros(tris.shape[0], dtype=float)
     tri_pts = nodes[tris]
+    tri_min = tri_pts.min(axis=1)
+    tri_max = tri_pts.max(axis=1)
+    poly_bounds = np.asarray(verts)
+    poly_min = poly_bounds.min(axis=0)
+    poly_max = poly_bounds.max(axis=0)
+    # Quick reject using bounding boxes before expensive clipping.
+    overlaps_bbox = (
+        (tri_max[:, 0] >= poly_min[0])
+        & (tri_min[:, 0] <= poly_max[0])
+        & (tri_max[:, 1] >= poly_min[1])
+        & (tri_min[:, 1] <= poly_max[1])
+    )
     areas = tri_area_vals if tri_area_vals is not None else tri_areas(nodes, tris)
     fractions = np.zeros(tris.shape[0], dtype=float)
-    for idx, pts in enumerate(tri_pts):
-        clipped: list[list[float]] = pts.tolist()
-        for i in range(len(verts)):
-            a = verts[i]
-            b = verts[(i + 1) % len(verts)]
-            clipped = _clip_polygon_to_edge(clipped, a, b)
-            if len(clipped) < 3:
-                break
-        if len(clipped) < 3:
-            continue
-        area = polygon_area(clipped)
-        if areas[idx] > 0:
-            fractions[idx] = area / areas[idx]
+    for idx in np.nonzero(overlaps_bbox)[0]:
+        pts = tri_pts[idx]
+        clipped = _clip_polygon_to_triangle(verts, pts)
+        if len(clipped) >= 3 and areas[idx] > 0:
+            area = polygon_area(clipped)
+            fractions[idx] = min(1.0, max(0.0, area / areas[idx]))
     return fractions
 
 
@@ -1576,30 +1594,32 @@ def polygon_overlap_fraction_loops(nodes,
     outer = loops[0]
     holes = loops[1:]
     tri_pts = nodes[tris]
+    tri_min = tri_pts.min(axis=1)
+    tri_max = tri_pts.max(axis=1)
+    bounds = np.asarray(outer)
+    poly_min = bounds.min(axis=0)
+    poly_max = bounds.max(axis=0)
+    # Quick reject using bounding boxes before expensive clipping.
+    overlaps_bbox = (
+        (tri_max[:, 0] >= poly_min[0])
+        & (tri_min[:, 0] <= poly_max[0])
+        & (tri_max[:, 1] >= poly_min[1])
+        & (tri_min[:, 1] <= poly_max[1])
+    )
     areas = tri_area_vals if tri_area_vals is not None else tri_areas(nodes, tris)
     fractions = np.zeros(tris.shape[0], dtype=float)
 
-    def clip_against_loop(pts_list, loop):
-        clipped = pts_list
-        for i in range(len(loop)):
-            a = loop[i]
-            b = loop[(i + 1) % len(loop)]
-            clipped = _clip_polygon_to_edge(clipped, a, b)
-            if len(clipped) < 3:
-                break
-        return clipped
-
-    for idx, pts in enumerate(tri_pts):
-        clipped_outer = clip_against_loop(pts.tolist(), outer)
-        if len(clipped_outer) < 3:
+    for idx in np.nonzero(overlaps_bbox)[0]:
+        pts = tri_pts[idx]
+        clipped_outer = _clip_polygon_to_triangle(outer, pts)
+        if len(clipped_outer) < 3 or areas[idx] <= 0:
             continue
         area = polygon_area(clipped_outer)
         for hole in holes:
-            clipped_hole = clip_against_loop(clipped_outer, hole)
+            clipped_hole = _clip_polygon_to_triangle(hole, pts)
             if len(clipped_hole) >= 3:
                 area -= polygon_area(clipped_hole)
-        if areas[idx] > 0:
-            fractions[idx] = max(0.0, min(1.0, area / areas[idx]))
+        fractions[idx] = max(0.0, min(1.0, area / areas[idx]))
     return fractions
 
 def _parse_args() -> argparse.Namespace:

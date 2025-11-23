@@ -765,6 +765,16 @@ function normalizeDesignShape(entry, fallbackRole = "magnet") {
     return { type: "circle", center, radius, role };
   }
   if (type === "polygon") {
+    const explicitVertices = normalizeVertices(shapeDef.vertices || entry.vertices);
+    const explicitHoles = normalizeHoles(shapeDef.holes || entry.holes);
+    if (explicitVertices && explicitVertices.length >= 3) {
+      return {
+        type: "polygon",
+        vertices: explicitVertices,
+        holes: explicitHoles && explicitHoles.length ? explicitHoles : undefined,
+        role,
+      };
+    }
     const radius = firstFiniteNumber(
       shapeDef.radius,
       shapeDef.size && typeof shapeDef.size === "object" ? shapeDef.size.radius : null,
@@ -828,6 +838,43 @@ function normalizeCenter(raw) {
     }
   }
   return null;
+}
+
+function normalizeVertices(raw) {
+  if (!Array.isArray(raw) || raw.length < 3) {
+    return null;
+  }
+  const verts = [];
+  for (const v of raw) {
+    if (Array.isArray(v) && v.length >= 2) {
+      const x = Number(v[0]);
+      const y = Number(v[1]);
+      if (Number.isFinite(x) && Number.isFinite(y)) {
+        verts.push([x, y]);
+      }
+    } else if (v && typeof v === "object") {
+      const x = firstFiniteNumber(v.x, v.X, v[0]);
+      const y = firstFiniteNumber(v.y, v.Y, v[1]);
+      if (Number.isFinite(x) && Number.isFinite(y)) {
+        verts.push([x, y]);
+      }
+    }
+  }
+  return verts.length >= 3 ? verts : null;
+}
+
+function normalizeHoles(raw) {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    return null;
+  }
+  const holes = [];
+  for (const hole of raw) {
+    const verts = normalizeVertices(hole);
+    if (verts && verts.length >= 3) {
+      holes.push(verts);
+    }
+  }
+  return holes.length ? holes : null;
 }
 
 function normalizeAngleDegrees(value) {
@@ -1059,6 +1106,30 @@ function drawDesignRing(shape) {
 }
 
 function drawDesignPolygon(shape) {
+  if (Array.isArray(shape.vertices) && shape.vertices.length >= 3) {
+    const outer = shape.vertices.map(([x, y]) => worldToScreen(x, y));
+    ctx.beginPath();
+    outer.forEach((pt, idx) => {
+      if (idx === 0) ctx.moveTo(pt.x, pt.y);
+      else ctx.lineTo(pt.x, pt.y);
+    });
+    ctx.closePath();
+    ctx.stroke();
+    if (Array.isArray(shape.holes)) {
+      shape.holes.forEach((hole) => {
+        const verts = hole.map(([x, y]) => worldToScreen(x, y));
+        if (verts.length < 3) return;
+        ctx.beginPath();
+        verts.forEach((pt, idx) => {
+          if (idx === 0) ctx.moveTo(pt.x, pt.y);
+          else ctx.lineTo(pt.x, pt.y);
+        });
+        ctx.closePath();
+        ctx.stroke();
+      });
+    }
+    return;
+  }
   const sides = Math.max(3, Math.round(shape.sides || 0));
   const radius = shape.radius ?? 0;
   if (!(radius > 0) || sides < 3) {
