@@ -1,7 +1,5 @@
 __pycache__/
 *.py[cod]
-*.npz
-*.npz.zip
 .Python
 env/
 venv/
@@ -10,6 +8,12 @@ pip-wheel-metadata/
 .idea/
 .vscode/
 .DS_Store
-case_builder_demo/mesh.npz
-cases/*/B_field.npz
-cases/*/Az_field.npz
+
+# Large solver outputs (keep case definitions but drop heavy results)
+*.npz
+*.npz.zip
+cases/**/mesh.npz
+cases/**/B_field.npz
+cases/**/Az_field.npz
+!cases/**/case_definition.json
+!cases/**/.gitkeep

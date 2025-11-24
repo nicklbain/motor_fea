@@ -1,0 +1,758 @@
+{
+  "name": "builder-demo",
+  "grid": {
+    "Nx": 400,
+    "Ny": 400,
+    "Lx": 0.6,
+    "Ly": 0.6,
+    "mesh": {
+      "type": "point_cloud",
+      "fine": 0.0002,
+      "coarse": 0.001,
+      "focus_pad": 0.004,
+      "focus_falloff": 0.003,
+      "focus_materials": [
+        "steel"
+      ],
+      "quality_min_angle": 28,
+      "field_focus": {
+        "enabled": true,
+        "direction_weight": 0,
+        "magnitude_weight": 1,
+        "indicator_gain": 100,
+        "indicator_neutral": null,
+        "scale_min": 0.2,
+        "scale_max": 5,
+        "smooth_passes": 1,
+        "size_smooth_passes": 2,
+        "ratio_limit": 1.7,
+        "indicator_clip": [
+          5,
+          95
+        ]
+      }
+    }
+  },
+  "defaults": {
+    "magnet": {
+      "mu_r": 1.05,
+      "Mx": 0,
+      "My": 800000
+    },
+    "steel": {
+      "mu_r": 1000
+    },
+    "wire": {
+      "current": 5000
+    },
+    "air": {
+      "mu_r": 1
+    },
+    "contour": {}
+  },
+  "objects": [
+    {
+      "id": "magnet-1",
+      "label": "Left magnet",
+      "material": "magnet",
+      "params": {
+        "mu_r": 1.05,
+        "Mx": 0,
+        "My": 800000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.21434644921786442,
+          0.25713946667422355
+        ],
+        "width": 0.03,
+        "height": 0.03,
+        "angle": 0
+      },
+      "group": ""
+    },
+    {
+      "id": "steel-1",
+      "label": "Steel 2",
+      "material": "steel",
+      "params": {
+        "mu_r": 1000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.28744682937076604,
+          0.44400688057454996
+        ],
+        "width": 0.01,
+        "height": 0.016,
+        "angle": 0
+      },
+      "group": ""
+    },
+    {
+      "id": "wire-pos",
+      "label": "Wire 3",
+      "material": "wire",
+      "params": {
+        "current": 6
+      },
+      "shape": {
+        "type": "circle",
+        "center": [
+          0.3039613324642937,
+          0.2117114883246431
+        ],
+        "radius": 0.002
+      },
+      "group": ""
+    },
+    {
+      "id": "wire-neg",
+      "label": "Wire 4",
+      "material": "wire",
+      "params": {
+        "current": -6
+      },
+      "shape": {
+        "type": "circle",
+        "center": [
+          0.2811219530403788,
+          0.20981561109638064
+        ],
+        "radius": 0.004
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-7rrywu9",
+      "label": "Left magnet copy",
+      "material": "magnet",
+      "params": {
+        "mu_r": 1.05,
+        "Mx": 800000,
+        "My": 0
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.24780830593969622,
+          0.25673676603944695
+        ],
+        "width": 0.03,
+        "height": 0.03,
+        "angle": 0
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-dl058zc",
+      "label": "Left magnet 2",
+      "material": "magnet",
+      "params": {
+        "mu_r": 1.05,
+        "Mx": 0,
+        "My": -800000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.28175687202448424,
+          0.2566921899795966
+        ],
+        "width": 0.03,
+        "height": 0.03,
+        "angle": 0
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-zt0i4ca",
+      "label": "Left magnet 2 copy",
+      "material": "magnet",
+      "params": {
+        "mu_r": 1.05,
+        "Mx": -800000,
+        "My": 0
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.3158414616866924,
+          0.25636493992292003
+        ],
+        "width": 0.03,
+        "height": 0.03,
+        "angle": 0
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-8nrhfvy",
+      "label": "Left magnet 3",
+      "material": "magnet",
+      "params": {
+        "mu_r": 1.05,
+        "Mx": 0,
+        "My": 800000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.3489854058036727,
+          0.25596206925867154
+        ],
+        "width": 0.03,
+        "height": 0.03,
+        "angle": 0
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-9vjt1jh",
+      "label": "Back iron",
+      "material": "steel",
+      "params": {
+        "mu_r": 2000,
+        "Mx": 0,
+        "My": 800000
+      },
+      "shape": {
+        "type": "ring",
+        "center": [
+          0.2873549707441679,
+          0.4116070209197074
+        ],
+        "outer_radius": 0.048,
+        "inner_radius": 0.045
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-iq3une0",
+      "label": "Mag 1 - N",
+      "material": "magnet",
+      "params": {
+        "mu_r": 1.05,
+        "Mx": 0,
+        "My": 800000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.28706672343929185,
+          0.4552342823248505
+        ],
+        "width": 0.005,
+        "height": 0.002,
+        "angle": 0
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-0z0crlj",
+      "label": "Mag 1 - S",
+      "material": "magnet",
+      "params": {
+        "mu_r": 1.05,
+        "Mx": 0,
+        "My": -800000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.26485911484106234,
+          0.4492046944324054
+        ],
+        "width": 0.005,
+        "height": 0.002,
+        "angle": 30
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-b0zgg0g",
+      "label": "Mag 1 - N",
+      "material": "magnet",
+      "params": {
+        "mu_r": 1.05,
+        "Mx": 0,
+        "My": 800000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.2495235307015347,
+          0.43355368463634003
+        ],
+        "width": 0.005,
+        "height": 0.002,
+        "angle": 60
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-ccwsrhq",
+      "label": "Mag 1 - S copy",
+      "material": "magnet",
+      "params": {
+        "mu_r": 1.05,
+        "Mx": 0,
+        "My": -800000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.24371821882377626,
+          0.41171536192003066
+        ],
+        "width": 0.005,
+        "height": 0.002,
+        "angle": 90
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-2kf2wf3",
+      "label": "Mag 1 - N copy",
+      "material": "magnet",
+      "params": {
+        "mu_r": 1.05,
+        "Mx": 0,
+        "My": 800000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.24951000226342052,
+          0.3899567105838145
+        ],
+        "width": 0.005,
+        "height": 0.002,
+        "angle": 120
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-x12uuiz",
+      "label": "Mag 1 - S copy copy",
+      "material": "magnet",
+      "params": {
+        "mu_r": 1.05,
+        "Mx": 0,
+        "My": -800000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.26459982465793447,
+          0.37448322489875097
+        ],
+        "width": 0.005,
+        "height": 0.002,
+        "angle": 150
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-5hqwfvl",
+      "label": "Mag 1 - N copy copy",
+      "material": "magnet",
+      "params": {
+        "mu_r": 1.05,
+        "Mx": 0,
+        "My": 800000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.28705891797373767,
+          0.36812429212822456
+        ],
+        "width": 0.005,
+        "height": 0.002,
+        "angle": 180
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-vam1kzv",
+      "label": "Mag 1 - S copy copy copy",
+      "material": "magnet",
+      "params": {
+        "mu_r": 1.05,
+        "Mx": 0,
+        "My": -800000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.3091689092679358,
+          0.37385744074485244
+        ],
+        "width": 0.005,
+        "height": 0.002,
+        "angle": -150
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-t5ducvy",
+      "label": "Mag 1 - N copy copy copy",
+      "material": "magnet",
+      "params": {
+        "mu_r": 1.05,
+        "Mx": 0,
+        "My": 800000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.32542655642000506,
+          0.3905935839426454
+        ],
+        "width": 0.005,
+        "height": 0.002,
+        "angle": -120
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-0sopjpq",
+      "label": "Mag 1 - S copy copy copy copy",
+      "material": "magnet",
+      "params": {
+        "mu_r": 1.05,
+        "Mx": 0,
+        "My": -800000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.33098852281981095,
+          0.4121228826104947
+        ],
+        "width": 0.005,
+        "height": 0.002,
+        "angle": -90
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-v1pessf",
+      "label": "Mag 1 - N copy copy copy copy",
+      "material": "magnet",
+      "params": {
+        "mu_r": 1.05,
+        "Mx": 0,
+        "My": 800000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.32523427789192105,
+          0.4332013376626059
+        ],
+        "width": 0.005,
+        "height": 0.002,
+        "angle": -60
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-aoyd0k9",
+      "label": "Mag 1 - S copy copy copy copy copy",
+      "material": "magnet",
+      "params": {
+        "mu_r": 1.05,
+        "Mx": 0,
+        "My": -800000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.3096872078109014,
+          0.4491838999059376
+        ],
+        "width": 0.005,
+        "height": 0.002,
+        "angle": -30
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-vaobaey",
+      "label": "Back iron copy",
+      "material": "steel",
+      "params": {
+        "mu_r": 2000,
+        "Mx": 0,
+        "My": 800000
+      },
+      "shape": {
+        "type": "ring",
+        "center": [
+          0.28748343299739976,
+          0.41175182923919473
+        ],
+        "outer_radius": 0.025,
+        "inner_radius": 0.015
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-6emre1n",
+      "label": "Steel 2 copy",
+      "material": "steel",
+      "params": {
+        "mu_r": 1000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.31953458239355303,
+          0.4176377837022728
+        ],
+        "width": 0.01,
+        "height": 0.016,
+        "angle": -80
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-7zkjzkl",
+      "label": "Stator tooth",
+      "material": "steel",
+      "params": {
+        "mu_r": 1000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.30882561183711393,
+          0.43611351724952246
+        ],
+        "width": 0.01,
+        "height": 0.016,
+        "angle": -40
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-v6poew9",
+      "label": "Stator tooth copy",
+      "material": "steel",
+      "params": {
+        "mu_r": 1000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.2664745895100844,
+          0.4361059499616598
+        ],
+        "width": 0.01,
+        "height": 0.016,
+        "angle": 40
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-d8bklk0",
+      "label": "Stator tooth copy copy",
+      "material": "steel",
+      "params": {
+        "mu_r": 1000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.31566571429902074,
+          0.39537519870993104
+        ],
+        "width": 0.01,
+        "height": 0.016,
+        "angle": -120
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-vh9x0gn",
+      "label": "Stator tooth copy copy copy",
+      "material": "steel",
+      "params": {
+        "mu_r": 1000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.29954941545703,
+          0.3814131030466569
+        ],
+        "width": 0.01,
+        "height": 0.016,
+        "angle": -160
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-y6aw22w",
+      "label": "Stator tooth copy copy copy copy",
+      "material": "steel",
+      "params": {
+        "mu_r": 1000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.25594296184229115,
+          0.4175803154206856
+        ],
+        "width": 0.01,
+        "height": 0.016,
+        "angle": 80
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-k0wm3g5",
+      "label": "Stator tooth copy copy copy copy copy",
+      "material": "steel",
+      "params": {
+        "mu_r": 1000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.27631924956807946,
+          0.38123838652274694
+        ],
+        "width": 0.01,
+        "height": 0.016,
+        "angle": 160
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-tkyb7iz",
+      "label": "Stator tooth copy copy copy copy copy copy",
+      "material": "steel",
+      "params": {
+        "mu_r": 1000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.25959835279061616,
+          0.39515103171979443
+        ],
+        "width": 0.01,
+        "height": 0.016,
+        "angle": 120
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-2s1g3te",
+      "label": "Coil",
+      "material": "wire",
+      "params": {
+        "current": -500,
+        "mu_r": 1000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.2947138850102936,
+          0.4439633010050459
+        ],
+        "width": 0.004,
+        "height": 0.015,
+        "angle": 0
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-bdgrohb",
+      "label": "Coil copy",
+      "material": "wire",
+      "params": {
+        "current": 500,
+        "mu_r": 1000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.2801360928056229,
+          0.4440680657426749
+        ],
+        "width": 0.004,
+        "height": 0.015,
+        "angle": 0
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-w2xn9fd",
+      "label": "Coil copy",
+      "material": "wire",
+      "params": {
+        "current": 1,
+        "mu_r": 1000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.3033698092562257,
+          0.44094841796523776
+        ],
+        "width": 0.004,
+        "height": 0.015,
+        "angle": -40
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-e0s4f61",
+      "label": "Coil copy copy",
+      "material": "wire",
+      "params": {
+        "current": 1,
+        "mu_r": 1000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.31429491097825135,
+          0.43146670798486386
+        ],
+        "width": 0.004,
+        "height": 0.015,
+        "angle": -40
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-aofa3z3",
+      "label": "Air Gap Contour",
+      "material": "contour",
+      "params": {
+        "Mx": 0,
+        "My": 800000,
+        "mu_r": 1.05
+      },
+      "shape": {
+        "type": "polygon",
+        "center": [
+          0.2875,
+          0.4118
+        ],
+        "radius": 0.042,
+        "sides": 80,
+        "rotation": -64.93146066040774
+      },
+      "group": ""
+    }
+  ]
+}

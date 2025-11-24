@@ -134,6 +134,12 @@ label {
   margin-bottom: 0;
 }
 
+.mesh-actions {
+  margin-top: 8px;
+  display: flex;
+  justify-content: flex-end;
+}
+
 input, select, button {
   font: inherit;
 }

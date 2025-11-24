@@ -30,6 +30,7 @@ const state = {
   neighbors: [],
   indicatorStats: null,
   designShapes: [],
+  indicatorPreview: null,
   viewport: { width: 0, height: 0 },
   view: {
     centerX: 0,
@@ -256,6 +257,7 @@ async function loadMesh(caseName, options = {}) {
     state.contours = mesh.contours || { segments: [], totals: [] };
     state.indicator = mesh.indicator || null;
     state.indicatorStats = mesh.summary?.indicator_stats || null;
+    state.indicatorPreview = computeIndicatorPreview(mesh);
     if (state.bMagnitudeScale === "log" && !state.bField?.logExtent) {
       state.bMagnitudeScale = "linear";
       if (bmagScaleSelect) {
@@ -300,6 +302,9 @@ async function loadMesh(caseName, options = {}) {
     showOverlay("Failed to load mesh.");
     updateStatus(`Error: ${message}`);
     state.contours = { segments: [], totals: [] };
+    state.indicator = null;
+    state.indicatorStats = null;
+    state.indicatorPreview = null;
     emitViewerEvent("caseLoadFailed", { caseName, error: message });
     return null;
   }
@@ -387,6 +392,157 @@ function computeCentroids(nodes, tris) {
   return centroids;
 }
 
+function extractFieldFocusParams(meta) {
+  const focus = (meta && (meta.field_focus_params || meta.field_focus)) || {};
+  const axisScaling = focus.axis_scaling || {};
+  const sizeMap = focus.size_map || {};
+  const magnitudeWeight = finiteOr(
+    focus.magnitude_weight,
+    focus.magnitudeWeight,
+    1.0
+  );
+  const directionWeight = finiteOr(
+    focus.direction_weight,
+    focus.directionWeight,
+    1.0
+  );
+  const gain = finiteOr(
+    focus.indicator_gain,
+    focus.indicatorGain,
+    sizeMap.alpha,
+    focus.alpha,
+    0.4
+  );
+  const neutral = finiteOr(
+    focus.indicator_neutral,
+    focus.indicatorNeutral,
+    null
+  );
+  const alphaMin = finiteOr(
+    focus.scale_min,
+    focus.scaleMin,
+    axisScaling.scale_min,
+    axisScaling.scaleMin,
+    0.5
+  );
+  const alphaMax = finiteOr(
+    focus.scale_max,
+    focus.scaleMax,
+    axisScaling.scale_max,
+    axisScaling.scaleMax,
+    2.0
+  );
+  return {
+    magnitudeWeight: Number.isFinite(magnitudeWeight) ? magnitudeWeight : 1.0,
+    directionWeight: Number.isFinite(directionWeight) ? directionWeight : 1.0,
+    indicatorGain: Math.max(Number.isFinite(gain) ? gain : 0.4, 0),
+    indicatorNeutral: Number.isFinite(neutral) && neutral > 0 ? neutral : null,
+    alphaMin: Math.max(
+      Number.isFinite(alphaMin) ? alphaMin : 0.5,
+      1e-6
+    ),
+    alphaMax: Math.max(
+      Number.isFinite(alphaMax) ? alphaMax : 2.0,
+      1e-6
+    ),
+  };
+}
+
+function computeIndicatorPreview(mesh) {
+  const indicator = mesh?.indicator || null;
+  if (
+    !indicator ||
+    !Array.isArray(indicator.magnitude) ||
+    !Array.isArray(indicator.direction)
+  ) {
+    return null;
+  }
+  const params = extractFieldFocusParams(mesh?.meta || {});
+  const len = Math.min(indicator.magnitude.length, indicator.direction.length);
+  if (len === 0) {
+    return null;
+  }
+  const combined = new Array(len);
+  const finiteVals = [];
+  for (let i = 0; i < len; i += 1) {
+    const mag = Number(indicator.magnitude[i]);
+    const dir = Number(indicator.direction[i]);
+    const val = params.magnitudeWeight * mag + params.directionWeight * dir;
+    const safeVal = Number.isFinite(val) ? val : NaN;
+    combined[i] = safeVal;
+    if (Number.isFinite(safeVal)) {
+      finiteVals.push(safeVal);
+    }
+  }
+  if (finiteVals.length === 0) {
+    return null;
+  }
+  const ref =
+    params.indicatorNeutral && params.indicatorNeutral > 0
+      ? params.indicatorNeutral
+      : percentile(finiteVals, 85);
+  const refSafe =
+    Number.isFinite(ref) && ref > 0
+      ? ref
+      : Math.max(percentile(finiteVals, 50) || 1.0, 1e-9);
+  const alphaMin = Math.max(params.alphaMin, 1e-6);
+  const alphaMax = Math.max(params.alphaMax, alphaMin);
+  const gain = Math.max(params.indicatorGain, 0);
+  const alphas = new Array(len);
+  let alphaMinSeen = Number.POSITIVE_INFINITY;
+  let alphaMaxSeen = Number.NEGATIVE_INFINITY;
+  let combinedMin = Number.POSITIVE_INFINITY;
+  let combinedMax = Number.NEGATIVE_INFINITY;
+  finiteVals.forEach((v) => {
+    if (Number.isFinite(v)) {
+      combinedMin = Math.min(combinedMin, v);
+      combinedMax = Math.max(combinedMax, v);
+    }
+  });
+  for (let i = 0; i < len; i += 1) {
+    const val = combined[i];
+    let alphaVal = alphaMax;
+    if (Number.isFinite(val) && refSafe > 0) {
+      const ratio = Math.max(val, 1e-12) / refSafe;
+      alphaVal = Math.pow(ratio, -gain);
+    }
+    if (!Number.isFinite(alphaVal)) {
+      alphaVal = alphaMax;
+    }
+    alphaVal = clamp(alphaVal, alphaMin, alphaMax);
+    alphas[i] = alphaVal;
+    if (Number.isFinite(alphaVal)) {
+      alphaMinSeen = Math.min(alphaMinSeen, alphaVal);
+      alphaMaxSeen = Math.max(alphaMaxSeen, alphaVal);
+    }
+  }
+  return {
+    params: {
+      directionWeight: params.directionWeight,
+      magnitudeWeight: params.magnitudeWeight,
+      indicatorGain: gain,
+      indicatorNeutral: params.indicatorNeutral,
+      alphaMin,
+      alphaMax,
+    },
+    ref: refSafe,
+    combined,
+    alphas,
+    stats: {
+      combined_min: Number.isFinite(combinedMin) ? combinedMin : 0,
+      combined_max: Number.isFinite(combinedMax) ? combinedMax : 0,
+      ref: refSafe,
+      gain,
+      weights: {
+        direction: params.directionWeight,
+        magnitude: params.magnitudeWeight,
+      },
+      alpha_min: Number.isFinite(alphaMinSeen) ? alphaMinSeen : alphaMin,
+      alpha_max: Number.isFinite(alphaMaxSeen) ? alphaMaxSeen : alphaMax,
+    },
+  };
+}
+
 function fitViewToBounds(bounds) {
   if (!bounds || state.viewport.width === 0 || state.viewport.height === 0) {
     return;
@@ -455,6 +611,7 @@ function updateSummary(mesh) {
     data ? `${label}: ${data.min.toFixed(3)} – ${data.max.toFixed(3)}` : "";
 
   const indicatorStats = summary.indicator_stats || state.indicatorStats || null;
+  const previewStats = state.indicatorPreview?.stats || null;
   const indicatorLines = indicatorStats
     ? `Magnitude indicator: ${formatNumber(indicatorStats.magnitude_min)} – ${formatNumber(
         indicatorStats.magnitude_max
@@ -464,6 +621,16 @@ function updateSummary(mesh) {
         indicatorStats.combined_max
       )}`
     : "";
+  const alphaLines = previewStats
+    ? `Alpha preview: ${formatNumber(previewStats.alpha_min, 4)} – ${formatNumber(
+        previewStats.alpha_max,
+        4
+      )}× (weights: dir=${formatNumber(previewStats.weights.direction, 3)}, mag=${formatNumber(
+        previewStats.weights.magnitude,
+        3
+      )}, gain=${formatNumber(previewStats.gain, 3)}, ref=${formatNumber(previewStats.ref, 4)})`
+    : "";
+  const indicatorBlock = [indicatorLines, alphaLines].filter(Boolean).join("<br/>");
   const contourTotals = state.contours?.totals || [];
   const contourSummary = contourTotals.length
     ? contourTotals
@@ -493,7 +660,7 @@ function updateSummary(mesh) {
         ${formatRange("|M|", stats.M_mag) || "|M|: n/a"}<br/>
         ${formatRange("J_z", stats.Jz) || "J_z: n/a"}<br/>
         ${formatRange("|B|", stats.Bmag) || "|B|: n/a"}<br/>
-        ${indicatorLines || "Indicator: n/a"}
+        ${indicatorBlock || "Indicator: n/a"}
       </dd>
       <dt>Contours</dt>
       <dd>${contourSummary}</dd>
@@ -564,10 +731,16 @@ function updateCellInfo(cellIndex) {
   }
   const indicatorData = state.indicator || {};
   const indicatorLines = [];
+  const indicatorPreview = state.indicatorPreview || null;
+  const previewParams = indicatorPreview?.params || null;
   const magIndicator = valueAt(indicatorData.magnitude, cellIndex);
   const dirIndicator = valueAt(indicatorData.direction, cellIndex);
   const combinedIndicator = valueAt(indicatorData.combined, cellIndex);
-  if (Number.isFinite(combinedIndicator)) {
+  const weightedCombined = indicatorPreview ? valueAt(indicatorPreview.combined, cellIndex) : null;
+  const alphaPreview = indicatorPreview ? valueAt(indicatorPreview.alphas, cellIndex) : null;
+  if (Number.isFinite(weightedCombined)) {
+    indicatorLines.push(`Combined (weighted) = ${formatNumber(weightedCombined, 4)}`);
+  } else if (Number.isFinite(combinedIndicator)) {
     indicatorLines.push(`Combined = ${formatNumber(combinedIndicator, 4)}`);
   }
   if (Number.isFinite(magIndicator)) {
@@ -576,13 +749,26 @@ function updateCellInfo(cellIndex) {
   if (Number.isFinite(dirIndicator)) {
     indicatorLines.push(`Direction = ${formatNumber(dirIndicator, 4)} 1/m`);
   }
+  if (Number.isFinite(alphaPreview) && previewParams) {
+    indicatorLines.push(
+      `Alpha preview = ${formatNumber(alphaPreview, 4)}× (limits ${formatNumber(
+        previewParams.alphaMin,
+        3
+      )}–${formatNumber(previewParams.alphaMax, 3)}×, ref=${formatNumber(
+        indicatorPreview.ref,
+        4
+      )}, gain=${formatNumber(previewParams.indicatorGain, 3)})`
+    );
+  }
   const neighborLines = [];
   const neighborList =
     Array.isArray(state.neighbors?.[cellIndex]) && state.neighbors[cellIndex]
       ? state.neighbors[cellIndex]
       : [];
   neighborList.forEach((nb) => {
-    const nbCombined = valueAt(indicatorData.combined, nb);
+    const nbCombined = indicatorPreview
+      ? valueAt(indicatorPreview.combined, nb)
+      : valueAt(indicatorData.combined, nb);
     if (Number.isFinite(nbCombined)) {
       neighborLines.push(`#${nb}: ${formatNumber(nbCombined, 4)}`);
     }
@@ -605,7 +791,14 @@ function updateCellInfo(cellIndex) {
       <dd>${materialLines.join("<br/>") || "n/a"}</dd>
       <dt>J<sub>z</sub></dt>
       <dd>${jLines.join("<br/>") || "n/a"}</dd>
-      <dt>Indicator (weights=1)</dt>
+      <dt>Indicator ${
+        previewParams
+          ? `(weights dir=${formatNumber(previewParams.directionWeight, 3)}, mag=${formatNumber(
+              previewParams.magnitudeWeight,
+              3
+            )})`
+          : "(weights=1)"
+      }</dt>
       <dd>${indicatorLines.join("<br/>") || "n/a"}</dd>
     </dl>
   `;
@@ -1762,6 +1955,34 @@ function pointInTriangle(px, py, a, b, c) {
   const u = (dot11 * dot02 - dot01 * dot12) * invDenom;
   const v = (dot00 * dot12 - dot01 * dot02) * invDenom;
   return u >= -1e-6 && v >= -1e-6 && u + v <= 1 + 1e-6;
+}
+
+function percentile(values, pct) {
+  if (!Array.isArray(values) || values.length === 0) {
+    return NaN;
+  }
+  const clipped = values.filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
+  if (clipped.length === 0) {
+    return NaN;
+  }
+  const rank = clamp((pct / 100) * (clipped.length - 1), 0, clipped.length - 1);
+  const low = Math.floor(rank);
+  const high = Math.ceil(rank);
+  const frac = rank - low;
+  if (high >= clipped.length) {
+    return clipped[clipped.length - 1];
+  }
+  return clipped[low] * (1 - frac) + clipped[high] * frac;
+}
+
+function finiteOr(...vals) {
+  for (const v of vals) {
+    const num = Number(v);
+    if (Number.isFinite(num)) {
+      return num;
+    }
+  }
+  return null;
 }
 
 function valueAt(arr, index) {

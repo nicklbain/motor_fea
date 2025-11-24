@@ -13,5 +13,10 @@ __pycache__/
 bokeh_debug*.html
 fontlist-*.json
 
-# Large simulation data
-cases/
+# Large simulation data: keep case definitions, drop heavy outputs
+cases/**/mesh.npz
+cases/**/B_field.npz
+cases/**/Az_field.npz
+cases/**/solve_*.npz
+!cases/**/case_definition.json
+!cases/**/.gitkeep

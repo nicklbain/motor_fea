@@ -36,7 +36,8 @@ except Exception:  # noqa: BLE001
 from field_adapt import FieldAdaptError, build_axes_from_field
 AIR, PMAG, STEEL = 0, 1, 2
 UNSTRUCTURED_MESH_TYPES = {"point_cloud", "pointcloud", "delaunay", "unstructured"}
-MAX_EXPLICIT_POLYGON_SIDES = 2048
+# Large explicit polygons are downsampled to keep overlap clipping affordable.
+MAX_EXPLICIT_POLYGON_SIDES = 256
 
 CASE_DEFINITION_FILENAME = "case_definition.json"
 
@@ -509,7 +510,8 @@ def _build_point_cloud_mesh(grid: dict,
                             *,
                             adapt_from: str | Path | None = None,
                             field_focus_spec: dict | None = None,
-                            field_focus_defaults: dict | None = None
+                            field_focus_defaults: dict | None = None,
+                            mesh_only: bool = False
                             ) -> tuple[np.ndarray, np.ndarray, tuple[float, float], dict]:
     mesh_spec = grid.get("mesh") or grid.get("meshing") or {}
     if not isinstance(mesh_spec, dict):
@@ -568,40 +570,77 @@ def _build_point_cloud_mesh(grid: dict,
         "enabled": True,
         "direction_weight": 1.0,
         "magnitude_weight": 1.0,
-        "indicator_gain": 1.0,
+        "indicator_gain": 0.4,  # exponent on indicator -> size mapping
         "indicator_neutral": None,
         "scale_min": 0.5,
         "scale_max": 2.0,
-        "smooth_passes": 1,
+        "smooth_passes": 2,
+        "size_smooth_passes": 2,
+        "indicator_clip": [5.0, 95.0],
+        "ratio_limit": 1.7,
     }
     field_focus_cfg.update(field_focus_defaults)
     if focus_overrides:
         field_focus_cfg.update(focus_overrides)
+    field_focus_params = {
+        "enabled": bool(field_focus_cfg.get("enabled", True)),
+        "direction_weight": float(field_focus_cfg.get("direction_weight", 1.0)),
+        "magnitude_weight": float(field_focus_cfg.get("magnitude_weight", 1.0)),
+        "indicator_gain": float(field_focus_cfg.get("indicator_gain", 0.4)),
+        "indicator_neutral": field_focus_cfg.get("indicator_neutral"),
+        "scale_min": float(field_focus_cfg.get("scale_min", 0.5)),
+        "scale_max": float(field_focus_cfg.get("scale_max", 2.0)),
+    }
     field_focus_scaling = None
     field_focus_meta = None
+    field_focus_size = None
 
     base_nx = max(int(math.ceil(Lx / coarse_x)) + 1, 2)
     base_ny = max(int(math.ceil(Ly / coarse_y)) + 1, 2)
     if adapt_from and field_focus_cfg.get("enabled", True):
-        neutral_value = field_focus_cfg.get("indicator_neutral")
         try:
-            neutral_value = float(neutral_value)
-        except (TypeError, ValueError):
-            neutral_value = None
-        try:
-            field_focus_scaling, field_focus_meta = _field_density_scaling_from_solution(
+            neutral_value = field_focus_cfg.get("indicator_neutral")
+            try:
+                neutral_value = float(neutral_value)
+            except (TypeError, ValueError):
+                neutral_value = None
+            clip_cfg = field_focus_cfg.get("indicator_clip", (5.0, 95.0))
+            if isinstance(clip_cfg, (list, tuple)) and len(clip_cfg) >= 2:
+                clip_tuple = (float(clip_cfg[0]), float(clip_cfg[1]))
+            else:
+                clip_tuple = (5.0, 95.0)
+            size_min_override = field_focus_cfg.get("size_min")
+            size_max_override = field_focus_cfg.get("size_max")
+            size_min_val = float(size_min_override) if size_min_override is not None else min(fine_x, fine_y)
+            size_max_val = float(size_max_override) if size_max_override is not None else max(coarse_x, coarse_y)
+            size_min_val = max(size_min_val, 1e-6)
+            size_max_val = max(size_max_val, size_min_val)
+            alpha = float(field_focus_cfg.get("indicator_gain", 0.4))
+            ratio_limit = float(field_focus_cfg.get("ratio_limit", 1.7))
+            scale_min = float(field_focus_cfg.get("scale_min", 0.5))
+            scale_max = float(field_focus_cfg.get("scale_max", 2.0))
+            smooth_passes = int(field_focus_cfg.get("smooth_passes", 2))
+            size_smooth_passes = int(field_focus_cfg.get("size_smooth_passes", smooth_passes))
+            field_focus_scaling, field_focus_meta, field_focus_size = _field_density_scaling_from_solution(
                 adapt_from,
                 Lx=Lx,
                 Ly=Ly,
                 ncols=base_nx - 1,
                 nrows=base_ny - 1,
+                coarse_x=coarse_x,
+                coarse_y=coarse_y,
                 magnitude_weight=float(field_focus_cfg.get("magnitude_weight", 1.0)),
                 direction_weight=float(field_focus_cfg.get("direction_weight", 1.0)),
-                gain=float(field_focus_cfg.get("indicator_gain", 1.0)),
+                size_min=size_min_val,
+                size_max=size_max_val,
+                alpha=alpha,
                 neutral_indicator=neutral_value,
-                scale_min=float(field_focus_cfg.get("scale_min", 0.5)),
-                scale_max=float(field_focus_cfg.get("scale_max", 2.0)),
-                smooth_passes=int(field_focus_cfg.get("smooth_passes", 1)),
+                clip_percentiles=clip_tuple,
+                smooth_passes=smooth_passes,
+                ratio_limit=ratio_limit,
+                scale_min=scale_min,
+                scale_max=scale_max,
+                size_smooth_passes=size_smooth_passes,
             )
         except FieldAdaptError as exc:
             raise SystemExit(f"Field-driven focus extraction failed: {exc}") from exc
@@ -614,6 +653,42 @@ def _build_point_cloud_mesh(grid: dict,
     point_chunks: list[np.ndarray] = []
     focus_point_raw = 0
     base_removed = 0
+    size_field_added = 0
+
+    if field_focus_size is not None and x_base.size >= 2 and y_base.size >= 2:
+        ncols_sf, nrows_sf = field_focus_size.shape
+        if ncols_sf != x_base.size - 1 or nrows_sf != y_base.size - 1:
+            # Best-effort crop to overlapping region (shapes should normally match).
+            ncols_sf = min(ncols_sf, x_base.size - 1)
+            nrows_sf = min(nrows_sf, y_base.size - 1)
+            field_focus_size = field_focus_size[:ncols_sf, :nrows_sf]
+            if field_focus_size.size == 0:
+                field_focus_size = None
+        if field_focus_size is not None:
+            max_subdiv = 50
+            col_limit = min(field_focus_size.shape[0], x_base.size - 1)
+            row_limit = min(field_focus_size.shape[1], y_base.size - 1)
+            for i in range(col_limit):
+                x0 = x_base[i]
+                x1 = x_base[i + 1]
+                dx = x1 - x0
+                for j in range(row_limit):
+                    y0 = y_base[j]
+                    y1 = y_base[j + 1]
+                    dy = y1 - y0
+                    target = float(field_focus_size[i, j])
+                    if not math.isfinite(target) or target <= 0:
+                        continue
+                    if target >= 0.95 * max(dx, dy):
+                        continue
+                    nx = max(2, min(int(math.ceil(dx / target)) + 1, max_subdiv))
+                    ny = max(2, min(int(math.ceil(dy / target)) + 1, max_subdiv))
+                    xs_local = np.linspace(x0, x1, nx)
+                    ys_local = np.linspace(y0, y1, ny)
+                    Xm, Ym = np.meshgrid(xs_local, ys_local, indexing="ij")
+                    fine_points = np.column_stack([Xm.ravel(), Ym.ravel()])
+                    point_chunks.append(fine_points)
+                    size_field_added += fine_points.shape[0]
 
     for (xmin, xmax, ymin, ymax) in focus_regions:
         width = xmax - xmin
@@ -649,7 +724,15 @@ def _build_point_cloud_mesh(grid: dict,
     min_angle = float(mesh_spec.get("quality_min_angle", 28.0))
     quality_nodes = quality_tris = None
     quality_used = False
-    if _triangle_lib is not None and min_angle > 0.0:
+
+    # If we're building a preview-only mesh and the point cloud is huge, skip Triangle quality meshing.
+    point_count = int(points.shape[0])
+    max_quality_points = int(mesh_spec.get("quality_point_limit", 150_000))
+    allow_quality = _triangle_lib is not None and min_angle > 0.0
+    if mesh_only and point_count > max_quality_points:
+        allow_quality = False
+
+    if allow_quality:
         quality_nodes, quality_tris = _quality_triangulation(points, min_angle=min_angle)
         quality_used = quality_nodes is not None and quality_tris is not None
 
@@ -673,6 +756,7 @@ def _build_point_cloud_mesh(grid: dict,
             "base": int(base_points.shape[0]),
             "base_removed": int(base_removed),
             "focus_raw": int(focus_point_raw),
+            "size_field": int(size_field_added),
             "unique": int(points.shape[0]),
         },
         "focus_pad": float(pad),
@@ -682,6 +766,8 @@ def _build_point_cloud_mesh(grid: dict,
             for (xmin, xmax, ymin, ymax) in focus_regions
         ],
     }
+    if field_focus_params:
+        mesh_meta["field_focus_params"] = field_focus_params
     if manual_boxes:
         mesh_meta["focus_boxes"] = manual_boxes
     if field_focus_meta:
@@ -694,6 +780,7 @@ def _build_point_cloud_mesh(grid: dict,
     else:
         mesh_meta["quality_mesher"] = {
             "backend": "scipy_delaunay",
+            "quality_skipped": bool(mesh_only and point_count > max_quality_points),
         }
     return nodes, tris, (Lx, Ly), mesh_meta
 
@@ -759,38 +846,50 @@ def _smooth_1d(values: np.ndarray, passes: int) -> np.ndarray:
     return out
 
 
-def _indicator_to_scaling(values: np.ndarray,
-                          neutral: float,
-                          gain: float,
-                          min_scale: float,
-                          max_scale: float) -> np.ndarray:
-    if values.size == 0:
+def _smooth_2d(values: np.ndarray, passes: int, *, log_space: bool = False) -> np.ndarray:
+    if passes <= 0 or values.size == 0:
         return values
-    finite = np.isfinite(values)
-    scales = np.ones_like(values, dtype=float)
-    if finite.any():
-        delta = values[finite] - neutral
-        scales[finite] = np.exp(-gain * delta)
-    scales = np.clip(scales, min_scale, max_scale)
-    scales[~finite] = 1.0
-    return scales
+    arr = values.astype(float)
+    if log_space:
+        arr = np.log(np.clip(arr, 1e-16, None))
+    kernel = np.array([[0.05, 0.1, 0.05],
+                       [0.1,  0.4, 0.1 ],
+                       [0.05, 0.1, 0.05]], dtype=float)
+    for _ in range(passes):
+        padded = np.pad(arr, 1, mode="edge")
+        window = (
+            kernel[0, 0] * padded[:-2, :-2] + kernel[0, 1] * padded[:-2, 1:-1] + kernel[0, 2] * padded[:-2, 2:] +
+            kernel[1, 0] * padded[1:-1, :-2] + kernel[1, 1] * padded[1:-1, 1:-1] + kernel[1, 2] * padded[1:-1, 2:] +
+            kernel[2, 0] * padded[2:, :-2] + kernel[2, 1] * padded[2:, 1:-1] + kernel[2, 2] * padded[2:, 2:]
+        )
+        arr = window
+    if log_space:
+        arr = np.exp(arr)
+    return arr
 
 
-def _project_indicator_to_axis(indicator: np.ndarray,
-                               coords: np.ndarray,
-                               length: float,
-                               bins: int) -> np.ndarray:
-    if bins <= 0 or length <= 0.0 or indicator.size == 0:
-        return np.zeros(max(bins, 0), dtype=float)
-    coords = np.clip(coords, 0.0, max(length - 1e-12, 0.0))
-    idx = np.floor(coords / max(length, 1e-12) * bins).astype(int)
-    idx = np.clip(idx, 0, bins - 1)
-    axis_vals = np.full(bins, -np.inf, dtype=float)
-    finite_mask = np.isfinite(indicator)
-    if finite_mask.any():
-        np.maximum.at(axis_vals, idx[finite_mask], indicator[finite_mask])
-    axis_vals[~np.isfinite(axis_vals)] = np.nan
-    return axis_vals
+def _limit_neighbor_ratio(field: np.ndarray, *, ratio: float, passes: int = 2) -> np.ndarray:
+    """Clamp neighboring entries so their ratio never exceeds `ratio`."""
+    if ratio <= 1.0 or field.size == 0:
+        return field
+    out = field.astype(float)
+    r = float(ratio)
+    for _ in range(max(1, passes)):
+        # Sweep rows
+        left = out[:, :-1]
+        right = out[:, 1:]
+        too_big = right > left * r
+        right[too_big] = left[too_big] * r
+        too_small = right * r < left
+        left[too_small] = right[too_small] * r
+        # Sweep cols
+        top = out[:-1, :]
+        bot = out[1:, :]
+        too_big = bot > top * r
+        bot[too_big] = top[too_big] * r
+        too_small = bot * r < top
+        top[too_small] = bot[too_small] * r
+    return out
 
 
 def _field_density_scaling_from_solution(field_path: str | Path,
@@ -799,13 +898,20 @@ def _field_density_scaling_from_solution(field_path: str | Path,
                                          Ly: float,
                                          ncols: int,
                                          nrows: int,
+                                         coarse_x: float,
+                                         coarse_y: float,
                                          magnitude_weight: float,
                                          direction_weight: float,
-                                         gain: float,
+                                         size_min: float,
+                                         size_max: float,
+                                         alpha: float,
                                          neutral_indicator: float | None,
+                                         clip_percentiles: tuple[float, float],
+                                         smooth_passes: int,
+                                         ratio_limit: float,
                                          scale_min: float,
                                          scale_max: float,
-                                         smooth_passes: int) -> tuple[dict[str, np.ndarray], dict]:
+                                         size_smooth_passes: int = 1) -> tuple[dict[str, np.ndarray], dict, np.ndarray]:
     path = Path(field_path).expanduser().resolve()
     if not path.exists():
         raise FieldAdaptError(f"adapt-from file '{path}' was not found")
@@ -829,43 +935,82 @@ def _field_density_scaling_from_solution(field_path: str | Path,
     finite_indicator = indicator[np.isfinite(indicator)]
     if finite_indicator.size == 0:
         raise FieldAdaptError("Field indicator is degenerate (no finite entries)")
-    baseline = neutral_indicator
-    if baseline is None or not math.isfinite(baseline):
-        baseline = float(np.median(finite_indicator))
-    gain = max(float(gain), 0.0)
+    clip_lo, clip_hi = clip_percentiles
+    clip_lo = max(0.0, float(clip_lo))
+    clip_hi = min(100.0, float(clip_hi))
+    if clip_hi < clip_lo:
+        clip_hi = clip_lo
+    if finite_indicator.size and (clip_lo > 0 or clip_hi < 100):
+        lo = np.percentile(finite_indicator, clip_lo)
+        hi = np.percentile(finite_indicator, clip_hi)
+        indicator = np.clip(indicator, lo, hi)
+        finite_indicator = indicator[np.isfinite(indicator)]
+    if finite_indicator.size == 0:
+        raise FieldAdaptError("Field indicator is degenerate after clipping")
+
+    # Bin indicator onto a coarse lattice using max within each bin.
+    grid = np.full((max(ncols, 1), max(nrows, 1)), np.nan, dtype=float)
+    xi = np.clip(np.floor(centroids[:, 0] / max(Lx, 1e-12) * grid.shape[0]).astype(int), 0, grid.shape[0] - 1)
+    yi = np.clip(np.floor(centroids[:, 1] / max(Ly, 1e-12) * grid.shape[1]).astype(int), 0, grid.shape[1] - 1)
+    np.maximum.at(grid, (xi, yi), indicator)
+    fill_value = float(np.median(finite_indicator))
+    grid = np.where(np.isfinite(grid), grid, fill_value)
+
+    # Smooth indicator a bit to avoid single-element spikes.
+    indicator_grid = _smooth_2d(grid, max(int(smooth_passes), 0))
+    if neutral_indicator is not None and math.isfinite(neutral_indicator) and neutral_indicator > 0:
+        ref = float(neutral_indicator)
+    else:
+        ref = float(np.percentile(indicator_grid, 85)) if indicator_grid.size else fill_value
+    ref = ref if math.isfinite(ref) and ref > 0 else fill_value if fill_value > 0 else 1.0
+    size_min = max(float(size_min), 1e-6)
+    size_max = max(float(size_max), size_min)
+    alpha = max(float(alpha), 0.0)
+    ratio_limit = max(float(ratio_limit), 1.0)
+    size_smooth_passes = max(int(size_smooth_passes), 0)
     scale_min = max(float(scale_min), 1e-3)
     scale_max = max(float(scale_max), scale_min)
-    smooth_passes = max(int(smooth_passes), 0)
 
-    col_values = _project_indicator_to_axis(indicator, centroids[:, 0], Lx, max(ncols, 0))
-    row_values = _project_indicator_to_axis(indicator, centroids[:, 1], Ly, max(nrows, 0))
-    finite_global = float(np.median(finite_indicator))
-    if col_values.size:
-        fill = finite_global
-        col_values = np.where(np.isfinite(col_values), col_values, fill)
-        col_values = _smooth_1d(col_values, smooth_passes)
-    if row_values.size:
-        fill = finite_global
-        row_values = np.where(np.isfinite(row_values), row_values, fill)
-        row_values = _smooth_1d(row_values, smooth_passes)
+    # Map indicator -> target size (work in log space for smoother variation).
+    size_grid = size_min * (indicator_grid / ref) ** (-alpha)
+    size_grid = np.clip(size_grid, size_min, size_max)
+    if size_smooth_passes:
+        size_grid = _smooth_2d(size_grid, size_smooth_passes, log_space=True)
+    if ratio_limit > 1.0:
+        size_grid = _limit_neighbor_ratio(size_grid, ratio=ratio_limit, passes=2)
+    size_grid = np.clip(size_grid, size_min, size_max)
 
-    x_scales = _indicator_to_scaling(col_values, baseline, gain, scale_min, scale_max) if col_values.size else np.array([])
-    y_scales = _indicator_to_scaling(row_values, baseline, gain, scale_min, scale_max) if row_values.size else np.array([])
+    col_target = np.median(size_grid, axis=1) if size_grid.size else np.array([])
+    row_target = np.median(size_grid, axis=0) if size_grid.size else np.array([])
+    x_scales = np.array([])
+    y_scales = np.array([])
+    if col_target.size:
+        x_scales = np.clip(col_target / max(coarse_x, 1e-12), scale_min, scale_max)
+    if row_target.size:
+        y_scales = np.clip(row_target / max(coarse_y, 1e-12), scale_min, scale_max)
 
     meta = {
         "source_field": str(path),
         "indicator": "B_gradient_directional",
         "magnitude_weight": float(magnitude_weight),
         "direction_weight": float(direction_weight),
-        "indicator_gain": gain,
-        "indicator_neutral": baseline,
-        "scale_min": float(scale_min),
-        "scale_max": float(scale_max),
-        "smooth_passes": smooth_passes,
-        "stats": {
-            "indicator_min": float(np.nanmin(indicator)),
-            "indicator_max": float(np.nanmax(indicator)),
-            "indicator_median": float(np.nanmedian(indicator)),
+        "indicator_neutral": float(neutral_indicator) if neutral_indicator is not None else None,
+        "indicator_stats": {
+            "min": float(np.min(indicator_grid)),
+            "max": float(np.max(indicator_grid)),
+            "median": float(np.median(indicator_grid)),
+            "p85": float(ref),
+        },
+        "size_map": {
+            "min": float(np.min(size_grid)),
+            "max": float(np.max(size_grid)),
+            "median": float(np.median(size_grid)),
+            "size_min": size_min,
+            "size_max": size_max,
+            "alpha": alpha,
+            "smooth_passes": size_smooth_passes,
+            "ratio_limit": ratio_limit,
+            "clip_percentiles": [float(clip_lo), float(clip_hi)],
         },
         "axis_scaling": {
             "x": {
@@ -878,9 +1023,11 @@ def _field_density_scaling_from_solution(field_path: str | Path,
                 "min": float(y_scales.min()) if y_scales.size else 1.0,
                 "max": float(y_scales.max()) if y_scales.size else 1.0,
             },
+            "scale_min": float(scale_min),
+            "scale_max": float(scale_max),
         },
     }
-    return {"x": x_scales, "y": y_scales}, meta
+    return {"x": x_scales, "y": y_scales}, meta, size_grid
 
 
 def _axis_from_spacing(total_length: float,
@@ -1054,8 +1201,14 @@ def build_fields(nodes, tris, LxLy,
 def build_fields_from_definition(nodes, tris, LxLy, definition, *,
                                  definition_source=None,
                                  grid_spec: dict | None = None,
-                                 mesh_meta: dict | None = None):
-    """Build material and source fields from a JSON case definition."""
+                                 mesh_meta: dict | None = None,
+                                 mesh_only: bool = False):
+    """Build material and source fields from a JSON case definition.
+
+    When `mesh_only` is True we switch to a fast centroid-based classifier
+    (no per-triangle polygon clipping) to keep mesh previews fast. The full
+    expensive painting runs only for a true solve.
+    """
     Lx, Ly = LxLy
     tri_area_vals = tri_areas(nodes, tris)
     Ne = tris.shape[0]
@@ -1064,6 +1217,203 @@ def build_fields_from_definition(nodes, tris, LxLy, definition, *,
     Mx = np.zeros(Ne, dtype=float)
     My = np.zeros(Ne, dtype=float)
     Jz = np.zeros(Ne, dtype=float)
+
+    def _fast_contains_polygon(points: np.ndarray, verts: list[list[float]], holes: list[list[list[float]]] | None):
+        """Fast point-in-polygon with chunking; returns boolean mask."""
+        poly = np.asarray(verts, dtype=float)
+        if poly.ndim != 2 or poly.shape[0] < 3:
+            return np.zeros(points.shape[0], dtype=bool)
+        edges_x0 = poly[:, 0]
+        edges_y0 = poly[:, 1]
+        edges_x1 = np.roll(edges_x0, -1)
+        edges_y1 = np.roll(edges_y0, -1)
+        chunk = 8192
+        inside = np.zeros(points.shape[0], dtype=bool)
+        for start in range(0, points.shape[0], chunk):
+            stop = min(points.shape[0], start + chunk)
+            px = points[start:stop, 0][:, None]
+            py = points[start:stop, 1][:, None]
+            cond = ((edges_y0 > py) != (edges_y1 > py)) & (
+                px < (edges_x1 - edges_x0) * (py - edges_y0) / (edges_y1 - edges_y0 + 1e-16) + edges_x0
+            )
+            cnt = cond.sum(axis=1)
+            inside[start:stop] = (cnt % 2) == 1
+        if holes:
+            for hole in holes:
+                hole_arr = np.asarray(hole, dtype=float)
+                if hole_arr.shape[0] < 3:
+                    continue
+                edges_x0 = hole_arr[:, 0]
+                edges_y0 = hole_arr[:, 1]
+                edges_x1 = np.roll(edges_x0, -1)
+                edges_y1 = np.roll(edges_y0, -1)
+                for start in range(0, points.shape[0], chunk):
+                    stop = min(points.shape[0], start + chunk)
+                    px = points[start:stop, 0][:, None]
+                    py = points[start:stop, 1][:, None]
+                    cond = ((edges_y0 > py) != (edges_y1 > py)) & (
+                        px < (edges_x1 - edges_x0) * (py - edges_y0) / (edges_y1 - edges_y0 + 1e-16) + edges_x0
+                    )
+                    cnt = cond.sum(axis=1)
+                    hole_inside = (cnt % 2) == 1
+                    inside[start:stop] &= ~hole_inside
+        return inside
+
+    def _fast_contains(shape: dict, pts: np.ndarray) -> np.ndarray:
+        """Centroid-based containment checks for fast mesh-only painting."""
+        stype = str(shape.get("type", "")).lower()
+        if stype == "polygon":
+            verts = shape.get("vertices") or []
+            holes_raw = shape.get("holes") or []
+            holes: list[list[list[float]]] = []
+            for h in holes_raw:
+                if isinstance(h, (list, tuple)) and len(h) >= 3:
+                    holes.append([[float(v[0]), float(v[1])] if not isinstance(v, dict) else [float(v.get("x", 0.0)), float(v.get("y", 0.0))] for v in h])
+            verts_arr: list[list[float]] = []
+            for v in verts:
+                try:
+                    if isinstance(v, dict):
+                        verts_arr.append([float(v.get("x", 0.0)), float(v.get("y", 0.0))])
+                    elif isinstance(v, (list, tuple)) and len(v) >= 2:
+                        verts_arr.append([float(v[0]), float(v[1])])
+                except (TypeError, ValueError):
+                    continue
+            if len(verts_arr) < 3:
+                return np.zeros(pts.shape[0], dtype=bool)
+            return _fast_contains_polygon(pts, verts_arr, holes)
+        if stype == "rect":
+            center = shape.get("center", [0.0, 0.0])
+            if isinstance(center, dict):
+                cx = float(center.get("x", 0.0))
+                cy = float(center.get("y", 0.0))
+            else:
+                cx, cy = (float(center[0]), float(center[1])) if isinstance(center, (list, tuple)) and len(center) >= 2 else (0.0, 0.0)
+            size = shape.get("size")
+            if isinstance(size, dict):
+                size_w = size.get("width")
+                size_h = size.get("height")
+            elif size is not None:
+                size_w = size_h = size
+            else:
+                size_w = size_h = None
+            width = float(shape.get("width", size_w if size_w is not None else 0.0))
+            height = float(shape.get("height", size_h if size_h is not None else 0.0))
+            angle = float(shape.get("angle", 0.0))
+            if width <= 0 or height <= 0:
+                return np.zeros(pts.shape[0], dtype=bool)
+            if abs(angle) > 1e-9:
+                ang = math.radians(angle)
+                cos_a = math.cos(ang)
+                sin_a = math.sin(ang)
+                rel = pts - np.array([cx, cy])
+                x_local = rel[:, 0] * cos_a + rel[:, 1] * sin_a
+                y_local = -rel[:, 0] * sin_a + rel[:, 1] * cos_a
+            else:
+                x_local = pts[:, 0] - cx
+                y_local = pts[:, 1] - cy
+            return (
+                (x_local >= -width / 2)
+                & (x_local <= width / 2)
+                & (y_local >= -height / 2)
+                & (y_local <= height / 2)
+            )
+        if stype == "circle":
+            center = shape.get("center", [0.0, 0.0])
+            if isinstance(center, dict):
+                cx = float(center.get("x", 0.0))
+                cy = float(center.get("y", 0.0))
+            else:
+                cx, cy = (float(center[0]), float(center[1])) if isinstance(center, (list, tuple)) and len(center) >= 2 else (0.0, 0.0)
+            radius = float(shape.get("radius", 0.0))
+            if radius <= 0:
+                return np.zeros(pts.shape[0], dtype=bool)
+            r2 = radius * radius
+            dx = pts[:, 0] - cx
+            dy = pts[:, 1] - cy
+            return (dx * dx + dy * dy) <= r2
+        if stype == "ring":
+            center = shape.get("center", [0.0, 0.0])
+            if isinstance(center, dict):
+                cx = float(center.get("x", 0.0))
+                cy = float(center.get("y", 0.0))
+            else:
+                cx, cy = (float(center[0]), float(center[1])) if isinstance(center, (list, tuple)) and len(center) >= 2 else (0.0, 0.0)
+            outer = float(shape.get("outer_radius", shape.get("outerRadius", shape.get("radius", 0.0))))
+            inner = float(shape.get("inner_radius", shape.get("innerRadius", 0.0)))
+            if outer <= 0:
+                return np.zeros(pts.shape[0], dtype=bool)
+            dx = pts[:, 0] - cx
+            dy = pts[:, 1] - cy
+            r2 = dx * dx + dy * dy
+            return (r2 <= outer * outer) & (r2 >= inner * inner)
+        return np.zeros(pts.shape[0], dtype=bool)
+
+    if mesh_only:
+        # Fast centroid classification: no clipping, but assigns materials.
+        centroids = nodes[tris].mean(axis=1)
+        defaults = definition.get("defaults", {}) if isinstance(definition, dict) else {}
+        objects = definition.get("objects", []) if isinstance(definition, dict) else []
+        for obj in objects:
+            if not isinstance(obj, dict):
+                continue
+            material = str(obj.get("material", "air")).lower()
+            if material not in {"air", "magnet", "steel", "wire"}:
+                continue
+            shape = obj.get("shape") or {}
+            mask = _fast_contains(shape, centroids)
+            if not np.any(mask):
+                continue
+            params = obj.get("params") or {}
+            mat_defaults = defaults.get(material, {}) if isinstance(defaults, dict) else {}
+
+            def _param(key, fallback):
+                if key in params:
+                    return params[key]
+                if isinstance(mat_defaults, dict) and key in mat_defaults:
+                    return mat_defaults[key]
+                return fallback
+
+            if material in {"air", "magnet", "steel"}:
+                target_mu = float(_param("mu_r", 1.0 if material == "air" else 1.05 if material == "magnet" else 1000.0))
+                mu_r[mask] = target_mu
+                if material == "magnet":
+                    target_mx = float(_param("Mx", 0.0))
+                    target_my = float(_param("My", 8e5))
+                    angle_deg = _shape_angle_degrees(shape)
+                    mx_rot, my_rot = _rotate_xy(target_mx, target_my, angle_deg)
+                    Mx[mask] = mx_rot
+                    My[mask] = my_rot
+                region_id = {"air": AIR, "magnet": PMAG, "steel": STEEL}[material]
+                region[mask] = region_id
+            if material == "wire":
+                total_current = float(_param("current", 0.0))
+                A = tri_area_vals[mask].sum()
+                if abs(A) > 0:
+                    Jz[mask] += total_current / A
+
+        meta = dict(
+            Lx=Lx,
+            Ly=Ly,
+            defaults=defaults,
+            geometry=objects,
+            case_definition=definition,
+        )
+        if definition_source:
+            meta["case_definition_source"] = str(definition_source)
+        if grid_spec is not None:
+            meta["grid"] = _safe_meta_copy(grid_spec)
+        if mesh_meta is not None:
+            meta["mesh_generation"] = _safe_meta_copy(mesh_meta)
+        return dict(
+            nodes=nodes,
+            tris=tris,
+            region_id=region,
+            mu_r=mu_r,
+            Mx=Mx,
+            My=My,
+            Jz=Jz,
+            meta=meta,
+        )
 
     defaults = definition.get("defaults", {})
     objects = definition.get("objects", [])
@@ -1187,7 +1537,28 @@ def rect_overlap_fraction(nodes, tris, cx, cy, width, height, tri_area=None, ang
         ymin = -height / 2
         ymax = height / 2
 
-    for idx, pts in enumerate(pts_iter):
+    # Bounding-box based culling: quickly mark tris entirely outside or inside.
+    tri_min = pts_iter.min(axis=1)
+    tri_max = pts_iter.max(axis=1)
+
+    outside = (
+        (tri_max[:, 0] < xmin)
+        | (tri_min[:, 0] > xmax)
+        | (tri_max[:, 1] < ymin)
+        | (tri_min[:, 1] > ymax)
+    )
+    inside = (
+        (tri_min[:, 0] >= xmin)
+        & (tri_max[:, 0] <= xmax)
+        & (tri_min[:, 1] >= ymin)
+        & (tri_max[:, 1] <= ymax)
+    )
+
+    fractions[inside] = 1.0
+    boundary_idxs = np.nonzero(~outside & ~inside)[0]
+
+    for idx in boundary_idxs:
+        pts = pts_iter[idx]
         area = polygon_rect_overlap_area(pts, xmin, xmax, ymin, ymax)
         if areas[idx] > 0:
             fractions[idx] = area / areas[idx]
@@ -1598,6 +1969,19 @@ def polygon_overlap_fraction_loops(nodes,
         return np.zeros(tris.shape[0], dtype=float)
     outer = loops[0]
     holes = loops[1:]
+    if len(outer) > MAX_EXPLICIT_POLYGON_SIDES:
+        step = math.ceil(len(outer) / MAX_EXPLICIT_POLYGON_SIDES)
+        outer = outer[::step]
+    if len(outer) < 3:
+        return np.zeros(tris.shape[0], dtype=float)
+    downsampled_holes: list[list[list[float]]] = []
+    for hole in holes:
+        if len(hole) > MAX_EXPLICIT_POLYGON_SIDES:
+            step = math.ceil(len(hole) / MAX_EXPLICIT_POLYGON_SIDES)
+            hole = hole[::step]
+        if len(hole) >= 3:
+            downsampled_holes.append(hole)
+    holes = downsampled_holes
     tri_pts = nodes[tris]
     tri_min = tri_pts.min(axis=1)
     tri_max = tri_pts.max(axis=1)
@@ -1680,23 +2064,28 @@ def _parse_args() -> argparse.Namespace:
                         help="Weight of directional change (angle of B) when deriving density scalars from a B-field")
     parser.add_argument("--adapt-magnitude-weight", type=float, default=1.0,
                         help="Weight of |B| magnitude gradients when deriving density scalars from a B-field")
-    parser.add_argument("--adapt-density-gain", type=float, default=1.0,
-                        help="Gain applied to indicator deviations when computing spacing multipliers (default: 1.0)")
+    parser.add_argument("--adapt-density-gain", type=float, default=0.4,
+                        help="Exponent applied when mapping indicator to target size (default: 0.4)")
     parser.add_argument("--adapt-density-neutral", type=float, default=float("nan"),
                         help="Indicator value that maps to a neutral (1×) spacing; NaN means auto median")
     parser.add_argument("--adapt-density-min-scale", type=float, default=0.5,
                         help="Minimum spacing multiplier applied by the field-driven density (default: 0.5)")
     parser.add_argument("--adapt-density-max-scale", type=float, default=2.0,
                         help="Maximum spacing multiplier applied by the field-driven density (default: 2.0)")
-    parser.add_argument("--adapt-density-smooth", type=int, default=1,
-                        help="Number of smoothing passes applied to the per-axis density scalars (default: 1)")
+    parser.add_argument("--adapt-density-smooth", type=int, default=2,
+                        help="Number of smoothing passes applied to the indicator/size maps (default: 2)")
+    parser.add_argument("--mesh-only", action="store_true",
+                        help="Generate mesh geometry only (skip material/field assignment; for previews)")
     return parser.parse_args()
 
 
-def _write_case(payload: dict, case_dir: Path, filename: str = "mesh.npz") -> Path:
+def _write_case(payload: dict, case_dir: Path, filename: str = "mesh.npz", *, compress: bool = True) -> Path:
     case_dir.mkdir(parents=True, exist_ok=True)
     outpath = case_dir / filename
-    np.savez_compressed(outpath, **payload)
+    if compress:
+        np.savez_compressed(outpath, **payload)
+    else:
+        np.savez(outpath, **payload)
     return outpath
 
 
@@ -1777,6 +2166,9 @@ if __name__ == "__main__":
             "scale_min": max(float(args.adapt_density_min_scale), 1e-3),
             "scale_max": max(float(args.adapt_density_max_scale), 1e-3),
             "smooth_passes": max(int(args.adapt_density_smooth), 0),
+            "size_smooth_passes": max(int(args.adapt_density_smooth), 0),
+            "indicator_clip": [5.0, 95.0],
+            "ratio_limit": 1.7,
         }
         if field_focus_defaults["scale_max"] < field_focus_defaults["scale_min"]:
             field_focus_defaults["scale_max"] = field_focus_defaults["scale_min"]
@@ -1844,6 +2236,7 @@ if __name__ == "__main__":
             definition_source=str(source),
             grid_spec=grid,
             mesh_meta=mesh_meta,
+            mesh_only=bool(args.mesh_only),
         )
     else:
         payload = build_fields(
@@ -1862,13 +2255,22 @@ if __name__ == "__main__":
             mesh_meta=mesh_meta,
         )
 
-    outpath = _write_case(payload, case_dir)
-    print(
-        f"Wrote {outpath} with:",
-        f"\n  nodes={payload['nodes'].shape}",
-        f"\n  tris={payload['tris'].shape}",
-        f"\n  mu_r:  [{payload['mu_r'].min():.3g}, {payload['mu_r'].max():.3g}]",
-        f"\n  |M|:   [{np.hypot(payload['Mx'],payload['My']).min():.3g}, "
-        f"{np.hypot(payload['Mx'],payload['My']).max():.3g}] A/m",
-        f"\n  Jz sum={payload['Jz'].sum() * (grid['Lx'] * grid['Ly']):.6g} A (approx)",
-    )
+    # Mesh-only previews prioritize speed over file size: skip compression.
+    outpath = _write_case(payload, case_dir, compress=not args.mesh_only)
+    if args.mesh_only:
+        print(
+            f"Wrote preview mesh {outpath} with:",
+            f"\n  nodes={payload['nodes'].shape}",
+            f"\n  tris={payload['tris'].shape}",
+            f"\n  mu_r:  [{payload['mu_r'].min():.3g}, {payload['mu_r'].max():.3g}]",
+        )
+    else:
+        print(
+            f"Wrote {outpath} with:",
+            f"\n  nodes={payload['nodes'].shape}",
+            f"\n  tris={payload['tris'].shape}",
+            f"\n  mu_r:  [{payload['mu_r'].min():.3g}, {payload['mu_r'].max():.3g}]",
+            f"\n  |M|:   [{np.hypot(payload['Mx'],payload['My']).min():.3g}, "
+            f"{np.hypot(payload['Mx'],payload['My']).max():.3g}] A/m",
+            f"\n  Jz sum={payload['Jz'].sum() * (grid['Lx'] * grid['Ly']):.6g} A (approx)",
+        )

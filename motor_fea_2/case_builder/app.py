@@ -35,11 +35,14 @@ DEFAULT_GRID = {
             "enabled": True,
             "direction_weight": 1.0,
             "magnitude_weight": 1.0,
-            "indicator_gain": 1.0,
+            "indicator_gain": 0.4,
             "indicator_neutral": None,
             "scale_min": 0.5,
             "scale_max": 2.0,
-            "smooth_passes": 1,
+            "smooth_passes": 2,
+            "size_smooth_passes": 2,
+            "indicator_clip": [5.0, 95.0],
+            "ratio_limit": 1.7,
         },
     },
 }
@@ -676,6 +679,103 @@ def api_run_case_adaptive(case_name: str):
     else:
         response["error"] = "Adaptive run did not complete successfully."
     return jsonify(response), 500
+
+
+@app.post("/api/case/<path:case_name>/mesh-adaptive")
+def api_mesh_adaptive(case_name: str):
+    try:
+        normalized = _normalize_case_name(case_name)
+        path = _case_definition_path(normalized)
+    except ValueError as exc:
+        abort(400, description=str(exc))
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        abort(400, description="Expected JSON object for case definition")
+    if not path.exists():
+        abort(400, description="No saved definition for this case. Run the standard case first.")
+    saved_definition = _load_definition(path)
+    if payload != saved_definition:
+        abort(409, description="Definition has changed since the last solve. Run the standard case first.")
+    b_field_path = (_case_dir(normalized) / "B_field.npz").resolve()
+    if not b_field_path.exists():
+        abort(400, description="No B_field.npz found. Run the standard case once before adaptive refinement.")
+    mesh_command = ["python3", "mesh_and_sources.py", "--case", normalized, "--adapt-from", str(b_field_path), "--mesh-only"]
+    completed = subprocess.run(mesh_command, cwd=REPO_ROOT, capture_output=True, text=True)
+    step_result: Dict[str, Any] = {
+        "step": "mesh",
+        "command": mesh_command,
+        "returncode": completed.returncode,
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+        "success": completed.returncode == 0,
+    }
+    response: Dict[str, Any] = {
+        "case": normalized,
+        "path": str(path),
+        "steps": [step_result],
+        "succeeded": completed.returncode == 0,
+        "mode": "field_point_cloud_mesh_only",
+        "adapt_from": str(b_field_path),
+    }
+    if completed.returncode == 0:
+        return jsonify(response)
+    response["error"] = f"Mesh generation failed with exit code {completed.returncode}"
+    return jsonify(response), 500
+
+
+@app.post("/api/case/<path:case_name>/mesh")
+def api_mesh_only(case_name: str):
+    try:
+        normalized = _normalize_case_name(case_name)
+        path = _case_definition_path(normalized)
+    except ValueError as exc:
+        abort(400, description=str(exc))
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        abort(400, description="Expected JSON object for case definition")
+    if not path.exists():
+        abort(400, description="No saved definition for this case. Save or run once first.")
+    saved_definition = _load_definition(path)
+    if payload != saved_definition:
+        abort(409, description="Definition has changed since the last save. Run the standard case first.")
+    mesh_command = ["python3", "mesh_and_sources.py", "--case", normalized, "--mesh-only"]
+    completed = subprocess.run(mesh_command, cwd=REPO_ROOT, capture_output=True, text=True)
+    step_result: Dict[str, Any] = {
+        "step": "mesh",
+        "command": mesh_command,
+        "returncode": completed.returncode,
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+        "success": completed.returncode == 0,
+    }
+    response: Dict[str, Any] = {
+        "case": normalized,
+        "path": str(path),
+        "steps": [step_result],
+        "succeeded": completed.returncode == 0,
+        "mode": "mesh_only",
+    }
+    if completed.returncode == 0:
+        return jsonify(response)
+    response["error"] = f"Mesh generation failed with exit code {completed.returncode}"
+    return jsonify(response), 500
+
+
+@app.get("/api/case/<path:case_name>/status")
+def api_case_status(case_name: str):
+    try:
+        normalized = _normalize_case_name(case_name)
+    except ValueError as exc:
+        abort(400, description=str(exc))
+    case_dir = _case_dir(normalized)
+    mesh_path = case_dir / "mesh.npz"
+    b_field_path = case_dir / "B_field.npz"
+    status = {
+        "case": normalized,
+        "has_mesh": mesh_path.exists(),
+        "has_solution": b_field_path.exists(),
+    }
+    return jsonify(status)
 
 
 def create_app() -> Flask:

@@ -35,9 +35,9 @@
           <div class="grid-inputs">
             <label>Lx (m) <input id="gridLx" type="number" min="0.01" step="0.01"></label>
             <label>Ly (m) <input id="gridLy" type="number" min="0.01" step="0.01"></label>
-            <label>Mesh mode
-              <select id="gridMeshMode">
-                <option value="point_cloud">Adaptive (localized focus near materials)</option>
+              <label>Mesh mode
+                <select id="gridMeshMode">
+                <option value="point_cloud">Material-aware</option>
                 <option value="uniform">Uniform (legacy Nx × Ny)</option>
               </select>
             </label>
@@ -70,18 +70,37 @@
               <label>Indicator neutral (auto if blank)
                 <input id="fieldIndicatorNeutral" type="number" step="1e-6" placeholder="auto">
               </label>
-              <label>Indicator gain
-                <input id="fieldIndicatorGain" type="number" min="0" step="0.1" value="1">
+              <label>Indicator gain (exponent)
+                <input id="fieldIndicatorGain" type="number" min="0" step="0.1" value="0.4">
               </label>
-              <label>Min spacing scale (× coarse)
+              <label>Min alpha (mesh densification multiple)
                 <input id="fieldScaleMin" type="number" min="0.01" step="0.05" value="0.5">
               </label>
-              <label>Max spacing scale (× coarse)
+              <label>Max alpha
                 <input id="fieldScaleMax" type="number" min="0.01" step="0.05" value="2">
               </label>
-              <label>Smoothing passes
-                <input id="fieldSmoothPasses" type="number" min="0" step="1" value="1">
+              <label>Indicator smoothing passes
+                <input id="fieldSmoothPasses" type="number" min="0" step="1" value="2">
               </label>
+              <label>Size smoothing passes
+                <input id="fieldSizeSmoothPasses" type="number" min="0" step="1" value="2">
+              </label>
+              <label>Neighbor ratio limit
+                <input id="fieldRatioLimit" type="number" min="1" step="0.1" value="1.7">
+              </label>
+              <label>Indicator clip low/high (%)
+                <input id="fieldIndicatorClipLow" type="number" min="0" max="100" step="1" value="5">
+                <input id="fieldIndicatorClipHigh" type="number" min="0" max="100" step="1" value="95">
+              </label>
+              <label>Target size min (m, blank = auto)
+                <input id="fieldSizeMin" type="number" min="0" step="0.0001" placeholder="auto">
+              </label>
+              <label>Target size max (m, blank = auto)
+                <input id="fieldSizeMax" type="number" min="0" step="0.0001" placeholder="auto">
+              </label>
+            </div>
+            <div class="mesh-actions">
+              <button id="adaptiveRunBtn" type="button" disabled>Mesh</button>
             </div>
           </div>
           <div id="uniformMeshControls" class="mesh-controls">
@@ -218,7 +237,6 @@
           <div class="button-row">
             <button id="saveCaseBtn">Save to folder</button>
             <button id="runCaseBtn">Run case</button>
-            <button id="adaptiveRunBtn" disabled>Adaptive mesh re-run</button>
             <button id="downloadBtn">Download JSON</button>
           </div>
           <p id="statusLine" class="status"></p>

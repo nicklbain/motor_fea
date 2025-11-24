@@ -24,6 +24,10 @@ const state = {
   view: null,
   lastAdaptiveMesh: null,
   lastRunSnapshot: null,
+  lastSolveSnapshot: null,
+  meshVersion: 0,
+  lastSolvedMeshVersion: 0,
+  hasBField: false,
   runBusy: false,
   adaptiveBusy: false,
   runStartedAt: null,
@@ -489,6 +493,7 @@ function init() {
     renderAll();
   }
   updateAdaptiveButtonState();
+  updateRunButtonState();
   emitBuilderEvent('ready', { caseName: state.caseName || null, cases: [...state.cases] });
 }
 
@@ -511,6 +516,7 @@ function cacheElements() {
   elements.meshFocusMagnet = document.getElementById('meshFocusMagnet');
   elements.meshFocusSteel = document.getElementById('meshFocusSteel');
   elements.meshFocusWire = document.getElementById('meshFocusWire');
+  elements.meshBtn = document.getElementById('adaptiveRunBtn');
   elements.fieldFocusEnabled = document.getElementById('fieldFocusEnabled');
   elements.fieldDirectionWeight = document.getElementById('fieldDirectionWeight');
   elements.fieldMagnitudeWeight = document.getElementById('fieldMagnitudeWeight');
@@ -519,6 +525,12 @@ function cacheElements() {
   elements.fieldScaleMin = document.getElementById('fieldScaleMin');
   elements.fieldScaleMax = document.getElementById('fieldScaleMax');
   elements.fieldSmoothPasses = document.getElementById('fieldSmoothPasses');
+  elements.fieldSizeSmoothPasses = document.getElementById('fieldSizeSmoothPasses');
+  elements.fieldIndicatorClipLow = document.getElementById('fieldIndicatorClipLow');
+  elements.fieldIndicatorClipHigh = document.getElementById('fieldIndicatorClipHigh');
+  elements.fieldRatioLimit = document.getElementById('fieldRatioLimit');
+  elements.fieldSizeMin = document.getElementById('fieldSizeMin');
+  elements.fieldSizeMax = document.getElementById('fieldSizeMax');
   elements.gradedMeshControls = document.getElementById('gradedMeshControls');
   elements.uniformMeshControls = document.getElementById('uniformMeshControls');
   elements.toolButtons = Array.from(document.querySelectorAll('.tool-btn'));
@@ -591,7 +603,6 @@ function cacheElements() {
   elements.newCaseBtn = document.getElementById('newCaseBtn');
   elements.saveCaseBtn = document.getElementById('saveCaseBtn');
   elements.runCaseBtn = document.getElementById('runCaseBtn');
-  elements.adaptiveRunBtn = document.getElementById('adaptiveRunBtn');
   elements.downloadBtn = document.getElementById('downloadBtn');
 }
 
@@ -715,8 +726,8 @@ function bindEvents() {
   elements.paramInputs.wire.current.addEventListener('input', () => updateParam('wire', 'current', elements.paramInputs.wire.current.value));
   elements.saveCaseBtn.addEventListener('click', saveCaseDefinition);
   elements.runCaseBtn.addEventListener('click', runCasePipeline);
-  if (elements.adaptiveRunBtn) {
-    elements.adaptiveRunBtn.addEventListener('click', runAdaptivePipeline);
+  if (elements.meshBtn) {
+    elements.meshBtn.addEventListener('click', runMeshPipeline);
   }
   elements.downloadBtn.addEventListener('click', downloadDefinition);
   if (elements.buildDxfSolidBtn) {
@@ -873,7 +884,7 @@ function updateGridInputs() {
     elements.fieldIndicatorGain.value =
       fieldFocus.indicator_gain ??
       fallbackFocus?.indicator_gain ??
-      1;
+      0.4;
   }
   if (elements.fieldScaleMin) {
     elements.fieldScaleMin.value =
@@ -891,7 +902,41 @@ function updateGridInputs() {
     elements.fieldSmoothPasses.value =
       fieldFocus.smooth_passes ??
       fallbackFocus?.smooth_passes ??
-      1;
+      2;
+  }
+  if (elements.fieldSizeSmoothPasses) {
+    elements.fieldSizeSmoothPasses.value =
+      fieldFocus.size_smooth_passes ??
+      fallbackFocus?.size_smooth_passes ??
+      fieldFocus.smooth_passes ??
+      fallbackFocus?.smooth_passes ??
+      2;
+  }
+  if (elements.fieldRatioLimit) {
+    elements.fieldRatioLimit.value =
+      fieldFocus.ratio_limit ??
+      fallbackFocus?.ratio_limit ??
+      1.7;
+  }
+  if (elements.fieldIndicatorClipLow) {
+    elements.fieldIndicatorClipLow.value =
+      (fieldFocus.indicator_clip && fieldFocus.indicator_clip[0]) ??
+      (fallbackFocus.indicator_clip && fallbackFocus.indicator_clip[0]) ??
+      5;
+  }
+  if (elements.fieldIndicatorClipHigh) {
+    elements.fieldIndicatorClipHigh.value =
+      (fieldFocus.indicator_clip && fieldFocus.indicator_clip[1]) ??
+      (fallbackFocus.indicator_clip && fallbackFocus.indicator_clip[1]) ??
+      95;
+  }
+  if (elements.fieldSizeMin) {
+    const val = fieldFocus.size_min ?? fallbackFocus.size_min;
+    elements.fieldSizeMin.value = Number.isFinite(val) ? val : '';
+  }
+  if (elements.fieldSizeMax) {
+    const val = fieldFocus.size_max ?? fallbackFocus.size_max;
+    elements.fieldSizeMax.value = Number.isFinite(val) ? val : '';
   }
   elements.definitionNameInput.value = state.definitionName || '';
   elements.caseNameInput.value = state.caseName || '';
@@ -987,7 +1032,7 @@ function updateGridFromInputs() {
     const indicatorGain = readNonNegativeNumber(
       elements.fieldIndicatorGain?.value,
       prevFieldFocus.indicator_gain ?? state.lastAdaptiveMesh?.field_focus?.indicator_gain,
-      1
+      0.4
     );
     const scaleMin =
       readPositiveNumber(
@@ -1007,8 +1052,44 @@ function updateGridFromInputs() {
     const smoothPasses = readNonNegativeInt(
       elements.fieldSmoothPasses?.value,
       prevFieldFocus.smooth_passes ?? state.lastAdaptiveMesh?.field_focus?.smooth_passes,
-      1
+      2
     );
+    const sizeSmoothPasses = readNonNegativeInt(
+      elements.fieldSizeSmoothPasses?.value,
+      prevFieldFocus.size_smooth_passes ?? state.lastAdaptiveMesh?.field_focus?.size_smooth_passes,
+      smoothPasses
+    );
+    const ratioLimit =
+      readPositiveNumber(
+        elements.fieldRatioLimit?.value,
+        prevFieldFocus.ratio_limit ?? state.lastAdaptiveMesh?.field_focus?.ratio_limit,
+        1
+      ) ?? 1.7;
+    const clipLow =
+      readNonNegativeNumber(
+        elements.fieldIndicatorClipLow?.value,
+        prevFieldFocus.indicator_clip?.[0] ?? state.lastAdaptiveMesh?.field_focus?.indicator_clip?.[0],
+        5
+      ) ?? 5;
+    const clipHigh =
+      readNonNegativeNumber(
+        elements.fieldIndicatorClipHigh?.value,
+        prevFieldFocus.indicator_clip?.[1] ?? state.lastAdaptiveMesh?.field_focus?.indicator_clip?.[1],
+        95
+      ) ?? 95;
+    let sizeMinOverride = readPositiveNumber(
+      elements.fieldSizeMin?.value,
+      prevFieldFocus.size_min ?? state.lastAdaptiveMesh?.field_focus?.size_min,
+      undefined
+    );
+    let sizeMaxOverride = readPositiveNumber(
+      elements.fieldSizeMax?.value,
+      prevFieldFocus.size_max ?? state.lastAdaptiveMesh?.field_focus?.size_max,
+      undefined
+    );
+    if (sizeMaxOverride && sizeMinOverride && sizeMaxOverride < sizeMinOverride) {
+      sizeMaxOverride = sizeMinOverride;
+    }
     const fieldFocusSettings = {
       enabled: elements.fieldFocusEnabled
         ? !!elements.fieldFocusEnabled.checked
@@ -1028,7 +1109,12 @@ function updateGridFromInputs() {
       scale_min: scaleMin,
       scale_max: scaleMax,
       smooth_passes: smoothPasses,
+      size_smooth_passes: sizeSmoothPasses,
+      ratio_limit: ratioLimit,
+      indicator_clip: [clipLow, clipHigh],
     };
+    if (sizeMinOverride) fieldFocusSettings.size_min = sizeMinOverride;
+    if (sizeMaxOverride) fieldFocusSettings.size_max = sizeMaxOverride;
     nextMesh.field_focus = fieldFocusSettings;
     state.lastAdaptiveMesh = deepCopy(nextMesh);
   }
@@ -1075,13 +1161,19 @@ function newCase(name) {
   state.selectedIds = [];
   state.dirty = false;
   state.lastRunSnapshot = null;
+  state.lastSolveSnapshot = null;
+  state.meshVersion = 0;
+  state.lastSolvedMeshVersion = 0;
+  state.hasBField = false;
   elements.caseNameInput.value = name;
   elements.definitionNameInput.value = name;
   resetView({ schedule: false });
   renderAll();
   setActiveTool('select');
   setStatus(`Started new case '${name}'.`, 'info');
+  updateBFieldToggleAvailability();
   updateAdaptiveButtonState();
+  updateRunButtonState();
   emitBuilderEvent('caseLoaded', { caseName: state.caseName, isNew: true });
 }
 
@@ -1107,11 +1199,16 @@ async function loadCase(caseName) {
     state.selectedIds = state.selectedId ? [state.selectedId] : [];
     state.dirty = false;
     state.lastRunSnapshot = null;
+    state.lastSolveSnapshot = null;
+    state.meshVersion = 0;
+    state.lastSolvedMeshVersion = 0;
     renderCaseSelect();
     renderAll();
     setActiveTool('select');
     setStatus(`Loaded ${state.caseName}`, 'info');
+    await refreshCaseStatus(state.caseName);
     updateAdaptiveButtonState();
+    updateRunButtonState();
     emitBuilderEvent('caseLoaded', { caseName: state.caseName });
   } catch (err) {
     console.error(err);
@@ -1120,6 +1217,31 @@ async function loadCase(caseName) {
       caseName,
       error: err?.message || String(err),
     });
+  }
+}
+
+async function refreshCaseStatus(caseName) {
+  if (!caseName) {
+    state.hasBField = false;
+    updateBFieldToggleAvailability();
+    updateAdaptiveButtonState();
+    return;
+  }
+  try {
+    const resp = await fetch(`/api/case/${encodeURIComponent(caseName)}/status`);
+    if (!resp.ok) throw new Error(await resp.text());
+    const data = await resp.json();
+    state.hasBField = !!data.has_solution;
+    if (state.hasBField) {
+      const fingerprint = fingerprintDefinition(serializeDefinition());
+      state.lastSolveSnapshot = { caseName: state.caseName, fingerprint };
+      state.lastSolvedMeshVersion = state.meshVersion;
+    }
+    updateBFieldToggleAvailability();
+    updateAdaptiveButtonState();
+    updateRunButtonState();
+  } catch (err) {
+    console.warn('Failed to refresh case status', err);
   }
 }
 
@@ -1271,7 +1393,7 @@ function sanitizeFieldFocus(spec, fallback) {
   const indicatorGain = readNonNegativeNumber(
     src.indicator_gain,
     fb.indicator_gain,
-    1
+    0.4
   );
   let indicatorNeutral =
     src.indicator_neutral !== undefined
@@ -1296,8 +1418,32 @@ function sanitizeFieldFocus(spec, fallback) {
   const smoothPasses = readNonNegativeInt(
     src.smooth_passes,
     fb.smooth_passes,
-    1
+    2
   );
+  const sizeSmoothPasses = readNonNegativeInt(
+    src.size_smooth_passes,
+    fb.size_smooth_passes,
+    smoothPasses
+  );
+  const ratioLimit =
+    readPositiveNumber(src.ratio_limit, fb.ratio_limit, 1.7) ?? 1.7;
+  const clipLow =
+    readNonNegativeNumber(
+      Array.isArray(src.indicator_clip) ? src.indicator_clip[0] : undefined,
+      Array.isArray(fb.indicator_clip) ? fb.indicator_clip[0] : undefined,
+      5
+    ) ?? 5;
+  const clipHigh =
+    readNonNegativeNumber(
+      Array.isArray(src.indicator_clip) ? src.indicator_clip[1] : undefined,
+      Array.isArray(fb.indicator_clip) ? fb.indicator_clip[1] : undefined,
+      95
+    ) ?? 95;
+  let sizeMin = readPositiveNumber(src.size_min, fb.size_min, undefined);
+  let sizeMax = readPositiveNumber(src.size_max, fb.size_max, undefined);
+  if (sizeMax && sizeMin && sizeMax < sizeMin) {
+    sizeMax = sizeMin;
+  }
   const fieldFocus = {
     enabled,
     direction_weight: directionWeight,
@@ -1307,7 +1453,12 @@ function sanitizeFieldFocus(spec, fallback) {
     scale_min: scaleMin,
     scale_max: scaleMax,
     smooth_passes: smoothPasses,
+    size_smooth_passes: sizeSmoothPasses,
+    ratio_limit: ratioLimit,
+    indicator_clip: [clipLow, clipHigh],
   };
+  if (sizeMin) fieldFocus.size_min = sizeMin;
+  if (sizeMax) fieldFocus.size_max = sizeMax;
   return fieldFocus;
 }
 
@@ -1778,6 +1929,7 @@ function markDirty() {
     state.dirty = true;
   }
   updateAdaptiveButtonState();
+  updateRunButtonState();
 }
 
 function scheduleDraw() {
@@ -3028,15 +3180,16 @@ async function saveCaseDefinition() {
 function setRunButtonBusy(isBusy) {
   state.runBusy = isBusy;
   if (elements.runCaseBtn) {
-    elements.runCaseBtn.disabled = isBusy;
     elements.runCaseBtn.dataset.busy = isBusy ? 'true' : 'false';
   }
+  updateRunButtonState();
   updateAdaptiveButtonState();
 }
 
 function setAdaptiveButtonBusy(isBusy) {
   state.adaptiveBusy = isBusy;
   updateAdaptiveButtonState();
+  updateRunButtonState();
 }
 
 function stableStringify(value) {
@@ -3061,43 +3214,68 @@ function fingerprintDefinition(definition) {
   return stableStringify(definition);
 }
 
-function evaluateAdaptiveState(options = {}) {
-  const { includeDefinition = false } = options;
-  if (!state.lastRunSnapshot) {
-    return { ok: false, reason: 'Run the case once before adaptive refinement.' };
+function evaluateMeshState() {
+  if (state.runBusy || state.adaptiveBusy) {
+    return { ok: false, reason: 'A job is currently running.' };
   }
-  if (!state.caseName || state.caseName !== state.lastRunSnapshot.caseName) {
-    return { ok: false, reason: 'Adaptive refinement is only available for the last solved case.' };
+  if (!state.caseName) {
+    return { ok: false, reason: 'Enter a case name first.' };
   }
-  if (state.dirty) {
-    return { ok: false, reason: 'Save and re-run the base case before adapting.' };
+  const bFocusChecked = !!elements.fieldFocusEnabled?.checked;
+  if (bFocusChecked && !state.hasBField) {
+    return { ok: false, reason: 'Solve once before B-field driven meshing.' };
   }
-  const definition = serializeDefinition();
-  const fingerprint = fingerprintDefinition(definition);
-  if (fingerprint !== state.lastRunSnapshot.fingerprint) {
-    return { ok: false, reason: 'Definition changed since the last solve.' };
-  }
-  return {
-    ok: true,
-    fingerprint,
-    definition: includeDefinition ? definition : undefined,
-  };
+  return { ok: true, reason: '' };
 }
 
 function updateAdaptiveButtonState() {
-  if (!elements.adaptiveRunBtn) return;
+  if (!elements.meshBtn) return;
   const busy = state.adaptiveBusy || state.runBusy;
-  const readiness = evaluateAdaptiveState();
+  const readiness = evaluateMeshState();
   const enabled = readiness.ok && !busy;
-  elements.adaptiveRunBtn.disabled = !enabled;
-  elements.adaptiveRunBtn.dataset.busy = state.adaptiveBusy ? 'true' : 'false';
-  if (busy) {
-    elements.adaptiveRunBtn.title = 'A solve is currently running.';
-  } else if (!readiness.ok) {
-    elements.adaptiveRunBtn.title = readiness.reason || 'Adaptive run unavailable.';
-  } else {
-    elements.adaptiveRunBtn.title = '';
+  elements.meshBtn.disabled = !enabled;
+  elements.meshBtn.dataset.busy = state.adaptiveBusy ? 'true' : 'false';
+  elements.meshBtn.title = enabled ? '' : readiness.reason || 'Mesh unavailable.';
+}
+
+function evaluateRunState() {
+  if (state.runBusy || state.adaptiveBusy) {
+    return { ok: false, reason: 'A job is currently running.' };
   }
+  if (state.dirty) {
+    return { ok: true, reason: '' };
+  }
+  const fingerprint = fingerprintDefinition(serializeDefinition());
+  const lastSolve = state.lastSolveSnapshot;
+  const meshVersion = state.meshVersion ?? 0;
+  const solvedVersion = state.lastSolvedMeshVersion ?? 0;
+  if (!lastSolve) {
+    return { ok: true, reason: '' };
+  }
+  if (meshVersion > solvedVersion) {
+    return { ok: true, reason: '' };
+  }
+  if (lastSolve.fingerprint && lastSolve.fingerprint !== fingerprint) {
+    return { ok: true, reason: '' };
+  }
+  return { ok: false, reason: 'No changes since last solve.' };
+}
+
+function updateRunButtonState() {
+  if (!elements.runCaseBtn) return;
+  const readiness = evaluateRunState();
+  elements.runCaseBtn.disabled = !readiness.ok;
+  elements.runCaseBtn.title = readiness.ok ? '' : readiness.reason || 'Already up to date.';
+}
+
+function updateBFieldToggleAvailability() {
+  if (!elements.fieldFocusEnabled) return;
+  const has = !!state.hasBField;
+  elements.fieldFocusEnabled.disabled = !has;
+  if (!has) {
+    elements.fieldFocusEnabled.checked = false;
+  }
+  elements.fieldFocusEnabled.title = has ? '' : 'Solve once before using B-field driven refinement.';
 }
 
 function summarizeSteps(steps) {
@@ -3151,6 +3329,12 @@ async function runCasePipeline() {
       caseName: state.caseName,
       fingerprint,
     };
+    state.meshVersion = (state.meshVersion || 0) + 1;
+    state.lastSolvedMeshVersion = state.meshVersion;
+    state.lastSolveSnapshot = {
+      caseName: state.caseName,
+      fingerprint,
+    };
     updateAdaptiveButtonState();
     const added = ensureCaseTracked(state.caseName);
     if (!added) {
@@ -3170,6 +3354,13 @@ async function runCasePipeline() {
       steps: data.steps || [],
       durationMs: elapsedMs ?? undefined,
     });
+    state.hasBField = true;
+    state.lastSolveSnapshot = {
+      caseName: state.caseName,
+      fingerprint,
+    };
+    state.lastSolvedMeshVersion = state.meshVersion;
+    updateBFieldToggleAvailability();
   } catch (err) {
     console.error(err);
     const elapsedMs = stopRunTimer();
@@ -3185,28 +3376,39 @@ async function runCasePipeline() {
   } finally {
     stopRunTimer();
     setRunButtonBusy(false);
+    updateRunButtonState();
   }
 }
 
-async function runAdaptivePipeline() {
-  const readiness = evaluateAdaptiveState({ includeDefinition: true });
-  if (!readiness.ok || !readiness.definition) {
-    setStatus(readiness.reason || 'Adaptive run unavailable. Run the base case first.', 'error');
-    return;
-  }
+async function runMeshPipeline() {
   const caseName = elements.caseNameInput.value.trim() || state.caseName;
   if (!caseName) {
-    setStatus('Enter a case folder name before running.', 'error');
+    setStatus('Enter a case folder name before meshing.', 'error');
     return;
   }
-  setRunButtonBusy(true);
+  const meshReady = evaluateMeshState();
+  if (!meshReady.ok) {
+    setStatus(meshReady.reason || 'Mesh unavailable.', 'error');
+    return;
+  }
+  const definition = serializeDefinition();
+  const fingerprint = fingerprintDefinition(definition);
   setAdaptiveButtonBusy(true);
-  const { definition, fingerprint } = readiness;
-  setStatus('Sampling ∇B from the last solve, rebuilding the mesh, and re-solving...', 'info');
+  setStatus('Building mesh...', 'info');
   startRunTimer();
   emitBuilderEvent('adaptiveRunStarted', { caseName, definition });
   try {
-    const response = await fetch(`/api/case/${encodeURIComponent(caseName)}/run-adaptive`, {
+    const saveResp = await fetch(`/api/case/${encodeURIComponent(caseName)}/definition`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(definition),
+    });
+    if (!saveResp.ok) {
+      throw new Error(await saveResp.text());
+    }
+    const useBField = !!elements.fieldFocusEnabled?.checked && state.hasBField;
+    const endpoint = useBField ? 'mesh-adaptive' : 'mesh';
+    const response = await fetch(`/api/case/${encodeURIComponent(caseName)}/${endpoint}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(definition),
@@ -3217,30 +3419,32 @@ async function runAdaptivePipeline() {
       try {
         data = JSON.parse(raw);
       } catch (parseErr) {
-        console.warn('Failed to parse adaptive run response JSON', parseErr);
+        console.warn('Failed to parse mesh response JSON', parseErr);
       }
     }
     if (!response.ok) {
       const message =
         (data && (data.error || data.message)) ||
         raw ||
-        `Adaptive run failed with status ${response.status}`;
+        `Mesh failed with status ${response.status}`;
       throw new Error(message);
     }
     state.caseName = data.case || caseName;
     state.definitionName = definition.name;
     state.dirty = false;
+    state.meshVersion = (state.meshVersion || 0) + 1;
     state.lastRunSnapshot = {
       caseName: state.caseName,
       fingerprint,
     };
     updateAdaptiveButtonState();
+    updateRunButtonState();
     const summary = summarizeSteps(data.steps);
     const suffix = summary ? ` (${summary})` : '';
     const elapsedMs = stopRunTimer();
     const elapsedLabel = formatDuration(elapsedMs);
     const timing = elapsedLabel ? ` · elapsed ${elapsedLabel}` : '';
-    setStatus(`Adaptive run complete${suffix}${timing}.`, 'success');
+    setStatus(`Mesh complete${suffix}${timing}.`, 'success');
     emitBuilderEvent('adaptiveRunCompleted', {
       caseName: state.caseName,
       succeeded: true,
@@ -3252,7 +3456,7 @@ async function runAdaptivePipeline() {
     const elapsedMs = stopRunTimer();
     const elapsedLabel = formatDuration(elapsedMs);
     const timing = elapsedLabel ? ` after ${elapsedLabel}` : '';
-    setStatus(`Adaptive run failed${timing}: ${err.message || err}`, 'error');
+    setStatus(`Mesh failed${timing}: ${err.message || err}`, 'error');
     emitBuilderEvent('adaptiveRunCompleted', {
       caseName: state.caseName || caseName,
       succeeded: false,
@@ -3262,7 +3466,6 @@ async function runAdaptivePipeline() {
   } finally {
     stopRunTimer();
     setAdaptiveButtonBusy(false);
-    setRunButtonBusy(false);
   }
 }
 
