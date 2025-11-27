@@ -510,6 +510,8 @@ function cacheElements() {
   elements.gridFineY = document.getElementById('gridFineY');
   elements.gridCoarseX = document.getElementById('gridCoarseX');
   elements.gridCoarseY = document.getElementById('gridCoarseY');
+  elements.expFinePitch = document.getElementById('expFinePitch');
+  elements.expCoarsePitch = document.getElementById('expCoarsePitch');
   elements.gridFocusPad = document.getElementById('gridFocusPad');
   elements.gridFocusFalloff = document.getElementById('gridFocusFalloff');
   elements.gridQualityAngle = document.getElementById('gridQualityAngle');
@@ -521,17 +523,17 @@ function cacheElements() {
   elements.fieldDirectionWeight = document.getElementById('fieldDirectionWeight');
   elements.fieldMagnitudeWeight = document.getElementById('fieldMagnitudeWeight');
   elements.fieldIndicatorNeutral = document.getElementById('fieldIndicatorNeutral');
+  elements.fieldIndicatorPercentile = document.getElementById('fieldIndicatorPercentile');
   elements.fieldIndicatorGain = document.getElementById('fieldIndicatorGain');
   elements.fieldScaleMin = document.getElementById('fieldScaleMin');
   elements.fieldScaleMax = document.getElementById('fieldScaleMax');
-  elements.fieldSmoothPasses = document.getElementById('fieldSmoothPasses');
-  elements.fieldSizeSmoothPasses = document.getElementById('fieldSizeSmoothPasses');
   elements.fieldIndicatorClipLow = document.getElementById('fieldIndicatorClipLow');
   elements.fieldIndicatorClipHigh = document.getElementById('fieldIndicatorClipHigh');
   elements.fieldRatioLimit = document.getElementById('fieldRatioLimit');
   elements.fieldSizeMin = document.getElementById('fieldSizeMin');
   elements.fieldSizeMax = document.getElementById('fieldSizeMax');
   elements.gradedMeshControls = document.getElementById('gradedMeshControls');
+  elements.experimentalMeshControls = document.getElementById('experimentalMeshControls');
   elements.uniformMeshControls = document.getElementById('uniformMeshControls');
   elements.toolButtons = Array.from(document.querySelectorAll('.tool-btn'));
   elements.shapeList = document.getElementById('shapeList');
@@ -640,16 +642,23 @@ function bindEvents() {
     elements.gridFineY,
     elements.gridCoarseX,
     elements.gridCoarseY,
+    elements.expFinePitch,
+    elements.expCoarsePitch,
     elements.gridFocusPad,
     elements.gridFocusFalloff,
     elements.gridQualityAngle,
     elements.fieldDirectionWeight,
     elements.fieldMagnitudeWeight,
     elements.fieldIndicatorNeutral,
+    elements.fieldIndicatorPercentile,
     elements.fieldIndicatorGain,
     elements.fieldScaleMin,
     elements.fieldScaleMax,
-    elements.fieldSmoothPasses,
+    elements.fieldIndicatorClipLow,
+    elements.fieldIndicatorClipHigh,
+    elements.fieldRatioLimit,
+    elements.fieldSizeMin,
+    elements.fieldSizeMax,
     elements.gridNx,
     elements.gridNy,
   ].filter(Boolean);
@@ -789,34 +798,44 @@ function renderAll() {
 
 function updateGridInputs() {
   const mesh = state.grid.mesh || {};
+  const fallbackMesh = state.lastAdaptiveMesh || {};
   elements.gridNx.value = state.grid.Nx;
   elements.gridNy.value = state.grid.Ny;
   elements.gridLx.value = state.grid.Lx;
   elements.gridLy.value = state.grid.Ly;
   if (elements.gridMeshMode) {
-    elements.gridMeshMode.value = mesh.type === 'uniform' ? 'uniform' : 'point_cloud';
+    const mode =
+      mesh.type === 'uniform' ? 'uniform' : mesh.type === 'experimental' ? 'experimental' : 'point_cloud';
+    elements.gridMeshMode.value = mode;
+  }
+  if (elements.expFinePitch) {
+    elements.expFinePitch.value = mesh.fine ?? fallbackMesh.fine ?? '';
+  }
+  if (elements.expCoarsePitch) {
+    elements.expCoarsePitch.value = mesh.coarse ?? fallbackMesh.coarse ?? '';
   }
   if (elements.gridFineX) {
-    elements.gridFineX.value = mesh.fine ?? '';
+    elements.gridFineX.value = mesh.fine ?? fallbackMesh.fine ?? '';
   }
   if (elements.gridCoarseX) {
-    elements.gridCoarseX.value = mesh.coarse ?? '';
+    elements.gridCoarseX.value = mesh.coarse ?? fallbackMesh.coarse ?? '';
   }
   const meshY = mesh.y || {};
+  const fallbackY = fallbackMesh.y || {};
   if (elements.gridFineY) {
-    elements.gridFineY.value = meshY.fine ?? '';
+    elements.gridFineY.value = meshY.fine ?? fallbackY.fine ?? '';
   }
   if (elements.gridCoarseY) {
-    elements.gridCoarseY.value = meshY.coarse ?? '';
+    elements.gridCoarseY.value = meshY.coarse ?? fallbackY.coarse ?? '';
   }
   if (elements.gridFocusPad) {
-    elements.gridFocusPad.value = mesh.focus_pad ?? '';
+    elements.gridFocusPad.value = mesh.focus_pad ?? fallbackMesh.focus_pad ?? '';
   }
   if (elements.gridFocusFalloff) {
-    elements.gridFocusFalloff.value = mesh.focus_falloff ?? '';
+    elements.gridFocusFalloff.value = mesh.focus_falloff ?? fallbackMesh.focus_falloff ?? '';
   }
   if (elements.gridQualityAngle) {
-    elements.gridQualityAngle.value = mesh.quality_min_angle ?? '';
+    elements.gridQualityAngle.value = mesh.quality_min_angle ?? fallbackMesh.quality_min_angle ?? '';
   }
   const focusMaterials = Array.isArray(mesh.focus_materials)
     ? mesh.focus_materials
@@ -886,6 +905,12 @@ function updateGridInputs() {
       fallbackFocus?.indicator_gain ??
       0.4;
   }
+  if (elements.fieldIndicatorPercentile) {
+    elements.fieldIndicatorPercentile.value =
+      fieldFocus.indicator_percentile ??
+      fallbackFocus?.indicator_percentile ??
+      85;
+  }
   if (elements.fieldScaleMin) {
     elements.fieldScaleMin.value =
       fieldFocus.scale_min ??
@@ -896,20 +921,6 @@ function updateGridInputs() {
     elements.fieldScaleMax.value =
       fieldFocus.scale_max ??
       fallbackFocus?.scale_max ??
-      2;
-  }
-  if (elements.fieldSmoothPasses) {
-    elements.fieldSmoothPasses.value =
-      fieldFocus.smooth_passes ??
-      fallbackFocus?.smooth_passes ??
-      2;
-  }
-  if (elements.fieldSizeSmoothPasses) {
-    elements.fieldSizeSmoothPasses.value =
-      fieldFocus.size_smooth_passes ??
-      fallbackFocus?.size_smooth_passes ??
-      fieldFocus.smooth_passes ??
-      fallbackFocus?.smooth_passes ??
       2;
   }
   if (elements.fieldRatioLimit) {
@@ -946,8 +957,8 @@ function updateGridInputs() {
 function updateGridFromInputs() {
   const prevGrid = state.grid;
   const mesh = prevGrid.mesh || {};
-  const mode =
-    (elements.gridMeshMode?.value || mesh.type || 'point_cloud') === 'uniform' ? 'uniform' : 'point_cloud';
+  const rawMode = elements.gridMeshMode?.value || mesh.type || 'point_cloud';
+  const mode = rawMode === 'uniform' ? 'uniform' : rawMode === 'experimental' ? 'experimental' : 'point_cloud';
   const Lx = Math.max(0.01, Number(elements.gridLx?.value) || prevGrid.Lx);
   const Ly = Math.max(0.01, Number(elements.gridLy?.value) || prevGrid.Ly);
   const focusBoxes = Array.isArray(mesh.focus_boxes) ? deepCopy(mesh.focus_boxes) : undefined;
@@ -960,6 +971,44 @@ function updateGridFromInputs() {
     Nx = Math.max(4, parseInt(elements.gridNx?.value, 10) || prevGrid.Nx);
     Ny = Math.max(4, parseInt(elements.gridNy?.value, 10) || prevGrid.Ny);
     nextMesh = { type: 'uniform' };
+  } else if (mode === 'experimental') {
+    const minDim = Math.max(Math.min(Lx, Ly), 0.01);
+    let fine = readPositiveNumber(elements.expFinePitch?.value, mesh.fine ?? minDim / 150, 1e-5) || minDim / 150;
+    let coarse =
+      readPositiveNumber(elements.expCoarsePitch?.value, mesh.coarse ?? minDim / 40, 1e-5) ||
+      Math.max(minDim / 40, fine);
+    fine = Math.min(fine, coarse);
+    const focusMaterials = Array.isArray(mesh.focus_materials)
+      ? mesh.focus_materials
+      : ['magnet', 'steel', 'wire'];
+    const focusPadSource =
+      mesh.type === 'experimental'
+        ? mesh.focus_pad
+        : state.lastAdaptiveMesh?.focus_pad;
+    const focusPad = Math.max(0, Number(focusPadSource ?? 0.01) || 0.01);
+    const focusFalloff = Math.max(
+      0,
+      Number(
+        mesh.type === 'experimental'
+          ? mesh.focus_falloff
+          : state.lastAdaptiveMesh?.focus_falloff ?? 0.5 * focusPad
+      ) || 0.5 * focusPad
+    );
+    if (elements.fieldFocusEnabled) {
+      elements.fieldFocusEnabled.checked = false;
+    }
+    nextMesh = {
+      type: 'experimental',
+      fine,
+      coarse,
+      focus_pad: focusPad,
+      focus_falloff: focusFalloff,
+      focus_materials: focusMaterials,
+    };
+    if (focusBoxes) {
+      nextMesh.focus_boxes = focusBoxes;
+    }
+    state.lastAdaptiveMesh = deepCopy(nextMesh);
   } else {
     const minDim = Math.max(Math.min(Lx, Ly), 0.01);
     let fineX = readPositiveNumber(elements.gridFineX?.value, mesh.fine ?? minDim / 150, 1e-5) || minDim / 150;
@@ -1012,6 +1061,11 @@ function updateGridFromInputs() {
     } else if ('quality_min_angle' in nextMesh) {
       delete nextMesh.quality_min_angle;
     }
+    const indicatorPercentile = readNonNegativeNumber(
+      elements.fieldIndicatorPercentile?.value,
+      prevFieldFocus.indicator_percentile ?? state.lastAdaptiveMesh?.field_focus?.indicator_percentile,
+      85
+    );
     let indicatorNeutral =
       prevFieldFocus.indicator_neutral ??
       state.lastAdaptiveMesh?.field_focus?.indicator_neutral ??
@@ -1049,16 +1103,6 @@ function updateGridFromInputs() {
     if (scaleMax < scaleMin) {
       scaleMax = scaleMin;
     }
-    const smoothPasses = readNonNegativeInt(
-      elements.fieldSmoothPasses?.value,
-      prevFieldFocus.smooth_passes ?? state.lastAdaptiveMesh?.field_focus?.smooth_passes,
-      2
-    );
-    const sizeSmoothPasses = readNonNegativeInt(
-      elements.fieldSizeSmoothPasses?.value,
-      prevFieldFocus.size_smooth_passes ?? state.lastAdaptiveMesh?.field_focus?.size_smooth_passes,
-      smoothPasses
-    );
     const ratioLimit =
       readPositiveNumber(
         elements.fieldRatioLimit?.value,
@@ -1106,10 +1150,9 @@ function updateGridFromInputs() {
       ),
       indicator_gain: indicatorGain,
       indicator_neutral: indicatorNeutral,
+      indicator_percentile: indicatorPercentile,
       scale_min: scaleMin,
       scale_max: scaleMax,
-      smooth_passes: smoothPasses,
-      size_smooth_passes: sizeSmoothPasses,
       ratio_limit: ratioLimit,
       indicator_clip: [clipLow, clipHigh],
     };
@@ -1135,12 +1178,17 @@ function updateGridFromInputs() {
 }
 
 function updateMeshModeVisibility() {
-  const mode = state.grid.mesh?.type === 'uniform' ? 'uniform' : 'adaptive';
+  const modeRaw = elements.gridMeshMode?.value || state.grid.mesh?.type || 'point_cloud';
+  const isUniform = modeRaw === 'uniform';
+  const isExperimental = modeRaw === 'experimental';
   if (elements.gradedMeshControls) {
-    elements.gradedMeshControls.classList.toggle('hidden', mode === 'uniform');
+    elements.gradedMeshControls.classList.toggle('hidden', isUniform || isExperimental);
+  }
+  if (elements.experimentalMeshControls) {
+    elements.experimentalMeshControls.classList.toggle('hidden', !isExperimental);
   }
   if (elements.uniformMeshControls) {
-    elements.uniformMeshControls.classList.toggle('hidden', mode !== 'uniform');
+    elements.uniformMeshControls.classList.toggle('hidden', !isUniform);
   }
 }
 
@@ -1305,7 +1353,14 @@ function sanitizeMesh(mesh, fallbackMesh = {}) {
       ? fallback.type.toLowerCase()
       : 'point_cloud';
   const adaptiveTypes = new Set(['point_cloud', 'point', 'pointcloud', 'graded', 'adaptive', 'delaunay']);
-  const type = typeRaw === 'uniform' ? 'uniform' : adaptiveTypes.has(typeRaw) ? 'point_cloud' : 'point_cloud';
+  let type = 'point_cloud';
+  if (typeRaw === 'uniform') {
+    type = 'uniform';
+  } else if (typeRaw === 'experimental' || typeRaw === 'equilateral') {
+    type = 'experimental';
+  } else if (adaptiveTypes.has(typeRaw)) {
+    type = 'point_cloud';
+  }
   if (type === 'uniform') {
     return { type: 'uniform' };
   }
@@ -1322,14 +1377,17 @@ function sanitizeMesh(mesh, fallbackMesh = {}) {
   const yFallback = fallback.y || {};
   const fineY = readPositiveNumber(ySource.fine ?? source.fine_y ?? yFallback.fine, null);
   const coarseY = readPositiveNumber(ySource.coarse ?? source.coarse_y ?? yFallback.coarse, null);
-  const focusPad = Math.max(
-    0,
-    Number(source.focus_pad ?? fallback.focus_pad ?? 0.02) || 0.02
-  );
-  const focusFalloff = Math.max(
-    0,
-    Number(source.focus_falloff ?? fallback.focus_falloff ?? 0.5 * focusPad) || 0.5 * focusPad
-  );
+  const defaultFocusPad = type === 'experimental' ? 0.01 : 0.02;
+  const focusPadSource =
+    type === 'experimental'
+      ? source.focus_pad ?? defaultFocusPad
+      : source.focus_pad ?? fallback.focus_pad ?? defaultFocusPad;
+  const focusPad = Math.max(0, Number(focusPadSource) || defaultFocusPad);
+  const focusFalloffSource =
+    type === 'experimental'
+      ? source.focus_falloff ?? 0.5 * focusPad
+      : source.focus_falloff ?? fallback.focus_falloff ?? 0.5 * focusPad;
+  const focusFalloff = Math.max(0, Number(focusFalloffSource) || 0.5 * focusPad);
   const focusMaterialsRaw = Array.isArray(source.focus_materials)
     ? source.focus_materials
     : fallback.focus_materials;
@@ -1339,7 +1397,7 @@ function sanitizeMesh(mesh, fallbackMesh = {}) {
         .filter((entry, idx, arr) => entry && arr.indexOf(entry) === idx)
     : ['magnet', 'steel', 'wire'];
   const meshSpec = {
-    type: 'point_cloud',
+    type,
     fine,
     coarse,
     focus_pad: focusPad,
@@ -1389,6 +1447,11 @@ function sanitizeFieldFocus(spec, fallback) {
     src.magnitude_weight,
     fb.magnitude_weight,
     1
+  );
+  const indicatorPercentile = clamp(
+    readNonNegativeNumber(src.indicator_percentile, fb.indicator_percentile, 85) ?? 85,
+    0,
+    100
   );
   const indicatorGain = readNonNegativeNumber(
     src.indicator_gain,
@@ -1448,6 +1511,7 @@ function sanitizeFieldFocus(spec, fallback) {
     enabled,
     direction_weight: directionWeight,
     magnitude_weight: magnitudeWeight,
+    indicator_percentile: indicatorPercentile,
     indicator_gain: indicatorGain,
     indicator_neutral: indicatorNeutral,
     scale_min: scaleMin,
@@ -3221,8 +3285,10 @@ function evaluateMeshState() {
   if (!state.caseName) {
     return { ok: false, reason: 'Enter a case name first.' };
   }
+  const modeRaw = elements.gridMeshMode?.value || state.grid.mesh?.type || 'point_cloud';
+  const usesBFocus = modeRaw !== 'uniform' && modeRaw !== 'experimental';
   const bFocusChecked = !!elements.fieldFocusEnabled?.checked;
-  if (bFocusChecked && !state.hasBField) {
+  if (usesBFocus && bFocusChecked && !state.hasBField) {
     return { ok: false, reason: 'Solve once before B-field driven meshing.' };
   }
   return { ok: true, reason: '' };

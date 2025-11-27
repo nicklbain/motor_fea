@@ -393,7 +393,12 @@ function computeCentroids(nodes, tris) {
 }
 
 function extractFieldFocusParams(meta) {
-  const focus = (meta && (meta.field_focus_params || meta.field_focus)) || {};
+  const gen = meta && meta.mesh_generation ? meta.mesh_generation : {};
+  const focus =
+    (meta && (meta.field_focus_params || meta.field_focus)) ||
+    gen.field_focus_params ||
+    gen.field_focus ||
+    {};
   const axisScaling = focus.axis_scaling || {};
   const sizeMap = focus.size_map || {};
   const magnitudeWeight = finiteOr(
@@ -418,6 +423,12 @@ function extractFieldFocusParams(meta) {
     focus.indicatorNeutral,
     null
   );
+  const percentileRef = finiteOr(
+    focus.indicator_percentile,
+    focus.indicatorPercentile,
+    focus.indicator_percentile_ref,
+    85
+  );
   const alphaMin = finiteOr(
     focus.scale_min,
     focus.scaleMin,
@@ -437,6 +448,11 @@ function extractFieldFocusParams(meta) {
     directionWeight: Number.isFinite(directionWeight) ? directionWeight : 1.0,
     indicatorGain: Math.max(Number.isFinite(gain) ? gain : 0.4, 0),
     indicatorNeutral: Number.isFinite(neutral) && neutral > 0 ? neutral : null,
+    indicatorPercentile: clamp(
+      Number.isFinite(percentileRef) ? percentileRef : 85,
+      0,
+      100
+    ),
     alphaMin: Math.max(
       Number.isFinite(alphaMin) ? alphaMin : 0.5,
       1e-6
@@ -457,30 +473,100 @@ function computeIndicatorPreview(mesh) {
   ) {
     return null;
   }
-  const params = extractFieldFocusParams(mesh?.meta || {});
+  const paramsFromIndicator = indicator.params
+    ? {
+        directionWeight: Number(indicator.params.direction_weight ?? indicator.params.directionWeight ?? indicator.params.dirWeight ?? indicator.params.direction) || indicator.params.directionWeight || undefined,
+        magnitudeWeight: Number(indicator.params.magnitude_weight ?? indicator.params.magnitudeWeight ?? indicator.params.magWeight ?? indicator.params.magnitude) || indicator.params.magnitudeWeight || undefined,
+        indicatorGain: Number(indicator.params.indicator_gain ?? indicator.params.gain ?? indicator.params.alpha) || indicator.params.indicatorGain || undefined,
+        indicatorNeutral: indicator.params.indicator_neutral ?? indicator.params.neutral ?? null,
+        indicatorPercentile: indicator.params.indicator_percentile ?? indicator.params.percentile ?? indicator.params.percentile_ref,
+        alphaMin: indicator.params.alpha_min ?? indicator.params.scale_min ?? indicator.params.alphaMin,
+        alphaMax: indicator.params.alpha_max ?? indicator.params.scale_max ?? indicator.params.alphaMax,
+      }
+    : null;
+  const params = paramsFromIndicator
+    ? {
+        directionWeight: Number.isFinite(paramsFromIndicator.directionWeight)
+          ? paramsFromIndicator.directionWeight
+          : 1.0,
+        magnitudeWeight: Number.isFinite(paramsFromIndicator.magnitudeWeight)
+          ? paramsFromIndicator.magnitudeWeight
+          : 1.0,
+        indicatorGain: Math.max(
+          Number.isFinite(paramsFromIndicator.indicatorGain)
+            ? paramsFromIndicator.indicatorGain
+            : 0.4,
+          0
+        ),
+        indicatorNeutral:
+          paramsFromIndicator.indicatorNeutral !== null &&
+          paramsFromIndicator.indicatorNeutral !== undefined &&
+          Number.isFinite(Number(paramsFromIndicator.indicatorNeutral))
+            ? Number(paramsFromIndicator.indicatorNeutral)
+            : null,
+        indicatorPercentile: Number.isFinite(
+          Number(paramsFromIndicator.indicatorPercentile)
+        )
+          ? Number(paramsFromIndicator.indicatorPercentile)
+          : 85,
+        alphaMin: Math.max(
+          Number.isFinite(Number(paramsFromIndicator.alphaMin))
+            ? Number(paramsFromIndicator.alphaMin)
+            : 0.5,
+          1e-6
+        ),
+        alphaMax: Math.max(
+          Number.isFinite(Number(paramsFromIndicator.alphaMax))
+            ? Number(paramsFromIndicator.alphaMax)
+            : 2.0,
+          1e-6
+        ),
+      }
+    : extractFieldFocusParams(mesh?.meta || {});
   const len = Math.min(indicator.magnitude.length, indicator.direction.length);
   if (len === 0) {
     return null;
   }
-  const combined = new Array(len);
+  const hasPreAlpha = Array.isArray(indicator.alpha) && indicator.alpha.length >= len;
+  const combined = Array.isArray(indicator.combined) && indicator.combined.length >= len
+    ? indicator.combined.slice(0, len)
+    : new Array(len);
   const finiteVals = [];
-  for (let i = 0; i < len; i += 1) {
-    const mag = Number(indicator.magnitude[i]);
-    const dir = Number(indicator.direction[i]);
-    const val = params.magnitudeWeight * mag + params.directionWeight * dir;
-    const safeVal = Number.isFinite(val) ? val : NaN;
-    combined[i] = safeVal;
-    if (Number.isFinite(safeVal)) {
-      finiteVals.push(safeVal);
+  if (!Array.isArray(indicator.combined) || indicator.combined.length < len) {
+    for (let i = 0; i < len; i += 1) {
+      const mag = Number(indicator.magnitude[i]);
+      const dir = Number(indicator.direction[i]);
+      const val = params.magnitudeWeight * mag + params.directionWeight * dir;
+      const safeVal = Number.isFinite(val) ? val : NaN;
+      combined[i] = safeVal;
+      if (Number.isFinite(safeVal)) {
+        finiteVals.push(safeVal);
+      }
+    }
+  } else {
+    for (let i = 0; i < len; i += 1) {
+      const val = Number(combined[i]);
+      const safeVal = Number.isFinite(val) ? val : NaN;
+      combined[i] = safeVal;
+      if (Number.isFinite(safeVal)) {
+        finiteVals.push(safeVal);
+      }
     }
   }
   if (finiteVals.length === 0) {
     return null;
   }
+  const refPercentile = clamp(
+    Number.isFinite(params.indicatorPercentile)
+      ? params.indicatorPercentile
+      : 85,
+    0,
+    100
+  );
   const ref =
     params.indicatorNeutral && params.indicatorNeutral > 0
       ? params.indicatorNeutral
-      : percentile(finiteVals, 85);
+      : percentile(finiteVals, refPercentile);
   const refSafe =
     Number.isFinite(ref) && ref > 0
       ? ref
@@ -488,7 +574,7 @@ function computeIndicatorPreview(mesh) {
   const alphaMin = Math.max(params.alphaMin, 1e-6);
   const alphaMax = Math.max(params.alphaMax, alphaMin);
   const gain = Math.max(params.indicatorGain, 0);
-  const alphas = new Array(len);
+  const alphas = hasPreAlpha ? indicator.alpha.slice(0, len) : new Array(len);
   let alphaMinSeen = Number.POSITIVE_INFINITY;
   let alphaMaxSeen = Number.NEGATIVE_INFINITY;
   let combinedMin = Number.POSITIVE_INFINITY;
@@ -499,18 +585,23 @@ function computeIndicatorPreview(mesh) {
       combinedMax = Math.max(combinedMax, v);
     }
   });
+  if (!hasPreAlpha) {
+    for (let i = 0; i < len; i += 1) {
+      const val = combined[i];
+      let alphaVal = alphaMax;
+      if (Number.isFinite(val) && refSafe > 0) {
+        const ratio = Math.max(val, 1e-12) / refSafe;
+        alphaVal = Math.pow(ratio, -gain);
+      }
+      if (!Number.isFinite(alphaVal)) {
+        alphaVal = alphaMax;
+      }
+      alphaVal = clamp(alphaVal, alphaMin, alphaMax);
+      alphas[i] = alphaVal;
+    }
+  }
   for (let i = 0; i < len; i += 1) {
-    const val = combined[i];
-    let alphaVal = alphaMax;
-    if (Number.isFinite(val) && refSafe > 0) {
-      const ratio = Math.max(val, 1e-12) / refSafe;
-      alphaVal = Math.pow(ratio, -gain);
-    }
-    if (!Number.isFinite(alphaVal)) {
-      alphaVal = alphaMax;
-    }
-    alphaVal = clamp(alphaVal, alphaMin, alphaMax);
-    alphas[i] = alphaVal;
+    const alphaVal = Number(alphas[i]);
     if (Number.isFinite(alphaVal)) {
       alphaMinSeen = Math.min(alphaMinSeen, alphaVal);
       alphaMaxSeen = Math.max(alphaMaxSeen, alphaVal);
@@ -522,6 +613,7 @@ function computeIndicatorPreview(mesh) {
       magnitudeWeight: params.magnitudeWeight,
       indicatorGain: gain,
       indicatorNeutral: params.indicatorNeutral,
+      indicatorPercentile: refPercentile,
       alphaMin,
       alphaMax,
     },
@@ -533,6 +625,7 @@ function computeIndicatorPreview(mesh) {
       combined_max: Number.isFinite(combinedMax) ? combinedMax : 0,
       ref: refSafe,
       gain,
+      ref_percentile: refPercentile,
       weights: {
         direction: params.directionWeight,
         magnitude: params.magnitudeWeight,
@@ -628,7 +721,10 @@ function updateSummary(mesh) {
       )}× (weights: dir=${formatNumber(previewStats.weights.direction, 3)}, mag=${formatNumber(
         previewStats.weights.magnitude,
         3
-      )}, gain=${formatNumber(previewStats.gain, 3)}, ref=${formatNumber(previewStats.ref, 4)})`
+      )}, gain=${formatNumber(previewStats.gain, 3)}, ref=${formatNumber(
+        previewStats.ref,
+        4
+      )}@p${formatNumber(previewStats.ref_percentile, 1)})`
     : "";
   const indicatorBlock = [indicatorLines, alphaLines].filter(Boolean).join("<br/>");
   const contourTotals = state.contours?.totals || [];

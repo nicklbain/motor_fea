@@ -5,8 +5,11 @@ import math
 from pathlib import Path
 from typing import Any, Dict, List
 
+import gzip
+import json
+
 import numpy as np
-from flask import Flask, abort, jsonify, render_template, request
+from flask import Flask, Response, abort, jsonify, render_template, request
 
 APP_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = APP_ROOT.parent
@@ -16,6 +19,36 @@ DEFAULT_MESH_NAME = "mesh.npz"
 LEGACY_DEFAULT_FILENAME = "mag2d_case.npz"
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
+
+
+def _finite_array(arr: Any, *, fill: float = 0.0) -> np.ndarray:
+    """Return a numpy array with NaN/Inf replaced by `fill` (or -fill)."""
+    out = np.asarray(arr)
+    if out.dtype.kind in {"f", "c"}:
+        out = np.nan_to_num(out, nan=fill, posinf=fill, neginf=-fill)
+    return out
+
+
+def _to_finite_list(arr: Any, *, fill: float = 0.0) -> list:
+    return _finite_array(arr, fill=fill).tolist()
+
+
+def _sanitize_obj(value: Any, *, fill: float = 0.0) -> Any:
+    """Recursively replace NaN/Inf in JSON-like objects."""
+    if isinstance(value, dict):
+        return {k: _sanitize_obj(v, fill=fill) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_obj(v, fill=fill) for v in value]
+    if isinstance(value, np.ndarray):
+        return _to_finite_list(value, fill=fill)
+    if isinstance(value, np.generic):
+        val = value.item()
+        if isinstance(val, float) and not math.isfinite(val):
+            return 0.0
+        return val
+    if isinstance(value, float):
+        return 0.0 if not math.isfinite(value) else value
+    return value
 
 
 def _list_case_names() -> List[str]:
@@ -74,21 +107,15 @@ def _resolve_case_path(case_name: str | None) -> Path:
 
 
 def _json_ready_meta(meta: Dict[str, Any]) -> Dict[str, Any]:
-    ready: Dict[str, Any] = {}
-    for key, value in meta.items():
-        if isinstance(value, np.generic):
-            ready[key] = value.item()
-        elif isinstance(value, (np.ndarray, list, tuple)):
-            ready[key] = np.asarray(value).tolist()
-        else:
-            ready[key] = value
-    return ready
+    return {k: _sanitize_obj(v) for k, v in meta.items()}
 
 
 def _field_stats(arr: np.ndarray) -> Dict[str, float]:
-    if arr.size == 0:
+    arr = _finite_array(arr)
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
         return {"min": 0.0, "max": 0.0}
-    return {"min": float(arr.min()), "max": float(arr.max())}
+    return {"min": float(finite.min()), "max": float(finite.max())}
 
 
 def _triangle_neighbors(tris: np.ndarray) -> list[list[int]]:
@@ -149,18 +176,46 @@ def _indicator_payload(
     Bmag: np.ndarray,
     Bx: np.ndarray,
     By: np.ndarray,
+    *,
+    indicator_arrays: Dict[str, np.ndarray] | None = None,
+    indicator_meta: Dict[str, Any] | None = None,
 ) -> Dict[str, Any] | None:
     if tris.ndim != 2 or tris.shape[1] != 3:
         return None
     if Bmag.shape[0] != tris.shape[0]:
         return None
+    pre_mag = None
+    pre_dir = None
+    pre_combined = None
+    pre_alpha = None
+    if indicator_arrays:
+        pre_mag = indicator_arrays.get("indicator_magnitude")
+        pre_dir = indicator_arrays.get("indicator_direction")
+        pre_combined = indicator_arrays.get("indicator_combined")
+        pre_alpha = indicator_arrays.get("alpha")
     try:
         centroids = nodes[tris].mean(axis=1)
     except Exception:  # noqa: BLE001
         return None
-    neighbors = _triangle_neighbors(tris)
-    mag_comp, dir_comp = _field_gradient_components(Bmag, Bx, By, centroids, neighbors)
-    combined = mag_comp + dir_comp
+    if (
+        pre_mag is not None
+        and pre_dir is not None
+        and np.asarray(pre_mag).shape[0] == tris.shape[0]
+        and np.asarray(pre_dir).shape[0] == tris.shape[0]
+    ):
+        mag_comp = np.asarray(pre_mag, dtype=float)
+        dir_comp = np.asarray(pre_dir, dtype=float)
+        if pre_combined is not None and np.asarray(pre_combined).shape[0] == mag_comp.shape[0]:
+            combined = np.asarray(pre_combined, dtype=float)
+        else:
+            combined = mag_comp + dir_comp
+    else:
+        neighbors = _triangle_neighbors(tris)
+        mag_comp, dir_comp = _field_gradient_components(Bmag, Bx, By, centroids, neighbors)
+        combined = mag_comp + dir_comp
+    mag_comp = _finite_array(mag_comp)
+    dir_comp = _finite_array(dir_comp)
+    combined = _finite_array(combined)
     stats = {
         "magnitude_min": float(np.min(mag_comp)),
         "magnitude_max": float(np.max(mag_comp)),
@@ -169,12 +224,30 @@ def _indicator_payload(
         "combined_min": float(np.min(combined)),
         "combined_max": float(np.max(combined)),
     }
-    return {
+    alpha_stats = None
+    if pre_alpha is not None and np.asarray(pre_alpha).shape[0] == combined.shape[0]:
+        alpha_arr = _finite_array(pre_alpha)
+        alpha_stats = {
+            "min": float(np.min(alpha_arr)),
+            "max": float(np.max(alpha_arr)),
+            "median": float(np.median(alpha_arr)),
+        }
+    payload = {
         "magnitude": mag_comp.tolist(),
         "direction": dir_comp.tolist(),
         "combined": combined.tolist(),
         "stats": stats,
     }
+    if alpha_stats:
+        payload["alpha_stats"] = alpha_stats
+    if pre_alpha is not None and np.asarray(pre_alpha).shape[0] == combined.shape[0]:
+        payload["alpha"] = alpha_arr.tolist()
+    if indicator_meta:
+        params = indicator_meta.get("params")
+        if isinstance(params, dict):
+            payload["params"] = params
+        payload["meta"] = indicator_meta
+    return payload
 
 
 def _load_b_field_payload(mesh_path: Path) -> tuple[Dict[str, Any], Dict[str, float], Dict[str, np.ndarray]] | None:
@@ -188,19 +261,28 @@ def _load_b_field_payload(mesh_path: Path) -> tuple[Dict[str, Any], Dict[str, fl
         By = np.asarray(data["By"], dtype=float)
         Bmag = np.asarray(data["Bmag"], dtype=float)
         payload: Dict[str, Any] = {
-            "Bx": Bx.tolist(),
-            "By": By.tolist(),
-            "Bmag": Bmag.tolist(),
+            "Bx": _to_finite_list(Bx),
+            "By": _to_finite_list(By),
+            "Bmag": _to_finite_list(Bmag),
             "source": b_path.name,
         }
+        indicator_arrays: Dict[str, np.ndarray] = {}
+        if "indicator_magnitude" in data and "indicator_direction" in data:
+            indicator_arrays["indicator_magnitude"] = _finite_array(data["indicator_magnitude"], fill=0.0)
+            indicator_arrays["indicator_direction"] = _finite_array(data["indicator_direction"], fill=0.0)
+        if "indicator_combined" in data:
+            indicator_arrays["indicator_combined"] = _finite_array(data["indicator_combined"], fill=0.0)
+        if "alpha" in data:
+            indicator_arrays["alpha"] = _finite_array(data["alpha"], fill=0.0)
         if "meta" in data:
             payload["meta"] = _json_ready_meta(data["meta"].item())
         if "contour_segments" in data:
-            payload["contour_segments"] = [dict(entry) for entry in data["contour_segments"].tolist()]
+            payload["contour_segments"] = [_sanitize_obj(dict(entry)) for entry in data["contour_segments"].tolist()]
         if "contour_totals" in data:
-            payload["contour_totals"] = [dict(entry) for entry in data["contour_totals"].tolist()]
+            payload["contour_totals"] = [_sanitize_obj(dict(entry)) for entry in data["contour_totals"].tolist()]
         stats = _field_stats(Bmag)
-    arrays = {"Bx": Bx, "By": By, "Bmag": Bmag}
+    arrays: Dict[str, np.ndarray] = {"Bx": Bx, "By": By, "Bmag": Bmag}
+    arrays.update(indicator_arrays)
     return payload, stats, arrays
 
 
@@ -209,9 +291,9 @@ def _load_mesh_payload(path: Path) -> Dict[str, Any]:
         nodes = data["nodes"]
         tris = data["tris"]
         payload: Dict[str, Any] = {
-            "nodes": nodes.tolist(),
+            "nodes": _to_finite_list(nodes),
             "tris": tris.tolist(),
-            "region_id": data.get("region_id", np.zeros(tris.shape[0])).tolist(),
+            "region_id": _to_finite_list(data.get("region_id", np.zeros(tris.shape[0]))),
             "fields": {},
             "summary": {},
         }
@@ -236,11 +318,11 @@ def _load_mesh_payload(path: Path) -> Dict[str, Any]:
         field_stats = {}
         for name in field_names:
             if name in data:
-                arr = data[name]
+                arr = _finite_array(data[name])
                 payload["fields"][name] = arr.tolist()
                 field_stats[name] = _field_stats(arr)
         if "Mx" in data and "My" in data:
-            mag = np.hypot(data["Mx"], data["My"])
+            mag = np.hypot(_finite_array(data["Mx"]), _finite_array(data["My"]))
             payload["fields"]["M_mag"] = mag.tolist()
             field_stats["M_mag"] = _field_stats(mag)
 
@@ -253,12 +335,19 @@ def _load_mesh_payload(path: Path) -> Dict[str, Any]:
                     "segments": b_field[0].get("contour_segments", []),
                     "totals": b_field[0].get("contour_totals", []),
                 }
+            indicator_arrays = {
+                key: b_field[2][key]
+                for key in ("indicator_magnitude", "indicator_direction", "indicator_combined", "alpha")
+                if key in b_field[2]
+            }
             indicator_info = _indicator_payload(
                 nodes,
                 tris,
                 b_field[2]["Bmag"],
                 b_field[2]["Bx"],
                 b_field[2]["By"],
+                indicator_arrays=indicator_arrays or None,
+                indicator_meta=(b_field[0].get("meta") or {}).get("field_indicator") if b_field[0].get("meta") else None,
             )
             if indicator_info:
                 payload["indicator"] = indicator_info
@@ -268,6 +357,8 @@ def _load_mesh_payload(path: Path) -> Dict[str, Any]:
         if "meta" in data:
             meta_obj = data["meta"].item()
             payload["meta"] = _json_ready_meta(meta_obj)
+        # Sanitize the full payload one layer deep (contours/meta already handled).
+        payload = _sanitize_obj(payload)
     payload["source"] = path.name
     return payload
 
@@ -292,7 +383,12 @@ def api_mesh():
     try:
         path = _resolve_case_path(case_name)
         payload = _load_mesh_payload(path)
-        return jsonify(payload)
+        # Large meshes can exceed browser limits; compress when big.
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        if len(body) > 1_000_000:
+            gz = gzip.compress(body)
+            return Response(gz, mimetype="application/json", headers={"Content-Encoding": "gzip"})
+        return Response(body, mimetype="application/json")
     except FileNotFoundError as exc:
         abort(404, description=str(exc))
     except ValueError as exc:

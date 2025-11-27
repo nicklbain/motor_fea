@@ -49,7 +49,7 @@ Each case lives under `cases/<case_name>/`:
 | --- | --- |
 | `mesh.npz` | Nodes, triangles, region IDs, μ_r, magnetization `(Mx, My)`, source current density `Jz`, and metadata produced by `mesh_and_sources.py`. |
 | `Az_field.npz` | Nodal vector potential solution `Az` computed by `solve_B.py` plus the original mesh data for reference. |
-| `B_field.npz` | Triangle-centered flux density: `Bx = ∂Az/∂y`, `By = -∂Az/∂x`, and `Bmag = √(Bx²+By²)`. |
+| `B_field.npz` | Triangle-centered flux density: `Bx = ∂Az/∂y`, `By = -∂Az/∂x`, and `Bmag = √(Bx²+By²)` (plus indicator/α breakdowns when available). |
 
 `solve_B.py` automatically creates the case subfolder if it is missing. Running the solver without arguments tries, in order:
 
@@ -202,6 +202,8 @@ The **Adaptive mesh** mode in the Case Builder now drives the new point-cloud me
 1. A coarse lattice covers the entire domain using the requested `coarse` spacing (optionally anisotropic via `mesh.y`).
 2. Each focus region (material bounds ± `focus_pad` or manually supplied `focus_boxes`) receives its own fine lattice sampled at `fine` spacing.
 3. Coarse-lattice points that fall inside each focus region are dropped before the Delaunay pass, so the fine patch cleanly replaces the surrounding rows/columns instead of dragging refinement strips across the domain.
+
+There’s also an **Experimental (equilateral-heavy)** mode in the Mesh mode dropdown. It builds a deterministic hex-like fill from a per-cell size grid, caps spacing near focus materials, and smoothly grades back to the coarse pitch to keep aspect ratios tame without invoking the legacy Triangle quality mesher.
 
 Need to bias only certain shapes? Uncheck the materials you don’t care about or add custom `focus_boxes` in the JSON. Switch the UI to “Uniform (legacy Nx × Ny)” if you truly need the old structured grid—the JSON will store `grid.mesh.type = "uniform"` plus the classic counts. Prefer fatter triangles? Raise the “Min triangle angle (deg)” control (or `grid.mesh.quality_min_angle`) so Triangle inserts extra Steiner points until that angle target is met; set it to 0 to fall back to the plain Delaunay mesh.
 

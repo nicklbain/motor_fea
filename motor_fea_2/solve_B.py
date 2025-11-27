@@ -32,6 +32,10 @@ DEFAULT_MESH_FILENAME = "mesh.npz"
 LEGACY_FLAT_FILENAME = "mag2d_case.npz"
 MU0 = 4e-7 * np.pi
 MAX_POLY_SIDES_EXPLICIT = 4096
+INDICATOR_CLIP_DEFAULT = (5.0, 95.0)
+ALPHA_MIN_DEFAULT = 0.5
+ALPHA_MAX_DEFAULT = 2.0
+INDICATOR_GAIN_DEFAULT = 0.4
 
 def load_case(path):
     data = np.load(path, allow_pickle=True)
@@ -154,12 +158,20 @@ def add_magnet_edge_load(f, nodes, tris, region, Mx, My):
 
 def solve_neumann_pinned(K, f, pin_node=0):
     """Pin one node (gauge fix) to eliminate the constant nullspace."""
-    K = K.tolil()
-    K[pin_node,:] = 0.0
-    K[:,pin_node] = 0.0
-    K[pin_node, pin_node] = 1.0
+    # Add a diagonal entry for any isolated nodes so the linear system is not singular.
+    # A handful of unreferenced nodes can show up from meshing; they should not influence
+    # the solution, so we pin them alongside the gauge node.
+    K = K.tocsr()
     f = f.copy()
-    f[pin_node] = 0.0
+    row_nnz = np.asarray(K.getnnz(axis=1)).ravel()
+    extra_pins = np.flatnonzero(row_nnz == 0)
+    pins = [pin_node] + [p for p in extra_pins if p != pin_node]
+    K = K.tolil()
+    for idx in pins:
+        K[idx, :] = 0.0
+        K[:, idx] = 0.0
+        K[idx, idx] = 1.0
+        f[idx] = 0.0
     K = K.tocsr()
     A = spla.spsolve(K, f)
     return A
@@ -407,6 +419,209 @@ def _compute_contour_forces(meta: dict[str, object],
     return segments, totals
 
 
+def _triangle_neighbors(tris: np.ndarray) -> list[list[int]]:
+    """Adjacency list where entry i contains neighboring triangle indices for tri i."""
+    neighbors: list[list[int]] = [[] for _ in range(tris.shape[0])]
+    edges: dict[tuple[int, int], int] = {}
+    for idx, tri in enumerate(tris):
+        for corner in range(3):
+            a = int(tri[corner])
+            b = int(tri[(corner + 1) % 3])
+            if a > b:
+                a, b = b, a
+            key = (a, b)
+            other = edges.get(key)
+            if other is None:
+                edges[key] = idx
+            else:
+                neighbors[idx].append(other)
+                neighbors[other].append(idx)
+    return neighbors
+
+
+def _angle_diff(rad_a: float, rad_b: float) -> float:
+    diff = rad_a - rad_b
+    return abs(np.arctan2(np.sin(diff), np.cos(diff)))
+
+
+def _field_gradient_components(
+    Bmag: np.ndarray,
+    Bx: np.ndarray,
+    By: np.ndarray,
+    centroids: np.ndarray,
+    neighbors: list[list[int]],
+) -> tuple[np.ndarray, np.ndarray]:
+    Ne = Bmag.shape[0]
+    mag_comp = np.zeros(Ne, dtype=float)
+    dir_comp = np.zeros(Ne, dtype=float)
+    angles = np.arctan2(By, Bx)
+    for idx in range(Ne):
+        c = centroids[idx]
+        best_mag = 0.0
+        best_dir = 0.0
+        for nb in neighbors[idx]:
+            dist = float(np.hypot(c[0] - centroids[nb, 0], c[1] - centroids[nb, 1]))
+            if dist <= 1e-12:
+                dist = 1e-12
+            best_mag = max(best_mag, abs(Bmag[idx] - Bmag[nb]) / dist)
+            angle_change = _angle_diff(angles[idx], angles[nb]) / dist
+            if np.isfinite(angle_change):
+                best_dir = max(best_dir, angle_change)
+        mag_comp[idx] = best_mag
+        dir_comp[idx] = best_dir
+    return mag_comp, dir_comp
+
+
+def _focus_params_from_meta(meta: dict[str, object]) -> dict[str, float | None]:
+    """Pull field-focus indicator settings out of solver/mesh metadata."""
+    params: dict[str, float | None] = {
+        "direction_weight": 1.0,
+        "magnitude_weight": 1.0,
+        "indicator_gain": INDICATOR_GAIN_DEFAULT,
+        "indicator_neutral": None,
+        "indicator_percentile": 85.0,
+        "alpha_min": ALPHA_MIN_DEFAULT,
+        "alpha_max": ALPHA_MAX_DEFAULT,
+        "indicator_clip": INDICATOR_CLIP_DEFAULT,
+    }
+    if not isinstance(meta, dict):
+        return params
+    focus = None
+    mesh_gen = meta.get("mesh_generation")
+    if isinstance(mesh_gen, dict):
+        if isinstance(mesh_gen.get("field_focus_params"), dict):
+            focus = mesh_gen["field_focus_params"]
+        elif isinstance(mesh_gen.get("field_focus"), dict):
+            focus = mesh_gen["field_focus"]
+    if focus is None and isinstance(meta.get("field_focus_params"), dict):
+        focus = meta["field_focus_params"]
+    if isinstance(focus, dict):
+        params.update({
+            "direction_weight": focus.get("direction_weight", params["direction_weight"]),
+            "magnitude_weight": focus.get("magnitude_weight", params["magnitude_weight"]),
+            "indicator_gain": focus.get("indicator_gain", params["indicator_gain"]),
+            "indicator_neutral": focus.get("indicator_neutral", params["indicator_neutral"]),
+            "indicator_percentile": focus.get("indicator_percentile", params["indicator_percentile"]),
+            "alpha_min": focus.get("scale_min", focus.get("alpha_min", params["alpha_min"])),
+            "alpha_max": focus.get("scale_max", focus.get("alpha_max", params["alpha_max"])),
+            "indicator_clip": focus.get("indicator_clip", params["indicator_clip"]),
+        })
+    # Ensure numeric sanity
+    params["direction_weight"] = float(params["direction_weight"] or 0.0)
+    params["magnitude_weight"] = float(params["magnitude_weight"] or 0.0)
+    try:
+        params["indicator_gain"] = max(float(params["indicator_gain"]), 0.0)
+    except Exception:
+        params["indicator_gain"] = INDICATOR_GAIN_DEFAULT
+    try:
+        neutral = float(params["indicator_neutral"])
+        params["indicator_neutral"] = neutral if np.isfinite(neutral) and neutral > 0 else None
+    except Exception:
+        params["indicator_neutral"] = None
+    try:
+        pct = float(params["indicator_percentile"])
+        params["indicator_percentile"] = float(np.clip(pct, 0.0, 100.0))
+    except Exception:
+        params["indicator_percentile"] = 85.0
+    try:
+        params["alpha_min"] = max(float(params["alpha_min"]), 1e-6)
+    except Exception:
+        params["alpha_min"] = ALPHA_MIN_DEFAULT
+    try:
+        params["alpha_max"] = max(float(params["alpha_max"]), params["alpha_min"])
+    except Exception:
+        params["alpha_max"] = ALPHA_MAX_DEFAULT
+    clip = params.get("indicator_clip", INDICATOR_CLIP_DEFAULT)
+    if isinstance(clip, (list, tuple)) and len(clip) >= 2:
+        try:
+            lo, hi = float(clip[0]), float(clip[1])
+            lo = max(lo, 0.0)
+            hi = max(hi, lo)
+            hi = min(hi, 100.0)
+            params["indicator_clip"] = (lo, hi)
+        except Exception:
+            params["indicator_clip"] = INDICATOR_CLIP_DEFAULT
+    else:
+        params["indicator_clip"] = INDICATOR_CLIP_DEFAULT
+    return params
+
+
+def _compute_indicator_and_alpha(
+    nodes: np.ndarray,
+    tris: np.ndarray,
+    Bx: np.ndarray,
+    By: np.ndarray,
+    Bmag: np.ndarray,
+    meta: dict[str, object],
+) -> dict[str, object] | None:
+    """Derive indicator components and alpha map for reuse in downstream meshing."""
+    if tris.ndim != 2 or tris.shape[1] != 3 or Bmag.shape[0] != tris.shape[0]:
+        return None
+    params = _focus_params_from_meta(meta)
+    centroids = nodes[tris].mean(axis=1)
+    neighbors = _triangle_neighbors(tris)
+    mag_comp, dir_comp = _field_gradient_components(Bmag, Bx, By, centroids, neighbors)
+    combined = params["magnitude_weight"] * mag_comp + params["direction_weight"] * dir_comp
+    finite = combined[np.isfinite(combined)]
+    if finite.size == 0:
+        return None
+    clip_lo, clip_hi = params["indicator_clip"]
+    if clip_lo > 0 or clip_hi < 100:
+        lo = np.percentile(finite, clip_lo)
+        hi = np.percentile(finite, clip_hi)
+        combined = np.clip(combined, lo, hi)
+        mag_comp = np.clip(mag_comp, lo, hi)
+        dir_comp = np.clip(dir_comp, lo, hi)
+        finite = combined[np.isfinite(combined)]
+    ref = params["indicator_neutral"]
+    if ref is None or not np.isfinite(ref) or ref <= 0:
+        ref = np.percentile(finite, params["indicator_percentile"])
+    if not np.isfinite(ref) or ref <= 0:
+        ref = max(np.median(finite), 1e-9)
+    gain = params["indicator_gain"]
+    alpha_min = params["alpha_min"]
+    alpha_max = max(params["alpha_max"], alpha_min)
+    alpha = np.full_like(combined, fill_value=alpha_max, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = np.maximum(combined, 1e-12) / ref
+        alpha = np.power(ratio, -gain)
+    alpha = np.clip(alpha, alpha_min, alpha_max)
+
+    stats = {
+        "magnitude_min": float(np.nanmin(mag_comp)),
+        "magnitude_max": float(np.nanmax(mag_comp)),
+        "direction_min": float(np.nanmin(dir_comp)),
+        "direction_max": float(np.nanmax(dir_comp)),
+        "combined_min": float(np.nanmin(combined)),
+        "combined_max": float(np.nanmax(combined)),
+        "alpha_min": float(np.nanmin(alpha)),
+        "alpha_max": float(np.nanmax(alpha)),
+        "ref_value": float(ref),
+    }
+    meta_entry = {
+        "params": {
+            "direction_weight": float(params["direction_weight"]),
+            "magnitude_weight": float(params["magnitude_weight"]),
+            "indicator_gain": float(gain),
+            "indicator_neutral": params["indicator_neutral"],
+            "indicator_percentile": float(params["indicator_percentile"]),
+            "alpha_min": float(alpha_min),
+            "alpha_max": float(alpha_max),
+            "indicator_clip": list(params["indicator_clip"]),
+        },
+        "stats": stats,
+        "clip_percentiles": list(params["indicator_clip"]),
+        "ref_value": float(ref),
+    }
+    return {
+        "magnitude": mag_comp,
+        "direction": dir_comp,
+        "combined": combined,
+        "alpha": alpha,
+        "meta": meta_entry,
+    }
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Solve Az for a generated case",
@@ -467,7 +682,8 @@ def _write_solution_files(case_mesh_path: Path,
                           meta: dict[str, object],
                           *,
                           contour_segments: list[dict[str, object]] | None = None,
-                          contour_totals: list[dict[str, object]] | None = None):
+                          contour_totals: list[dict[str, object]] | None = None,
+                          indicator: dict[str, object] | None = None):
     case_dir = case_mesh_path.parent
     case_dir.mkdir(parents=True, exist_ok=True)
     az_path = case_dir / "Az_field.npz"
@@ -480,6 +696,11 @@ def _write_solution_files(case_mesh_path: Path,
         tris=tris, nodes=nodes,
         region_id=region, mu_r=mu_r, meta=meta,
     )
+    if indicator:
+        payload["indicator_magnitude"] = indicator.get("magnitude")
+        payload["indicator_direction"] = indicator.get("direction")
+        payload["indicator_combined"] = indicator.get("combined")
+        payload["alpha"] = indicator.get("alpha")
     if contour_segments is not None:
         payload["contour_segments"] = np.array(contour_segments, dtype=object)
     if contour_totals is not None:
@@ -495,9 +716,15 @@ if __name__ == "__main__":
     K, f = assemble_A_system(nodes, tris, region, mu_r, Mx, My, Jz)
     Az = solve_neumann_pinned(K, f, pin_node=args.pin_node)
     Bx, By, Bmag = compute_triangle_B(nodes, tris, Az)
+    indicator = _compute_indicator_and_alpha(nodes, tris, Bx, By, Bmag, meta)
+    if indicator and indicator.get("meta"):
+        # Store indicator/alpha provenance in the mesh metadata so downstream tools can reuse it.
+        meta = dict(meta)
+        meta["field_indicator"] = indicator["meta"]
     contour_segments, contour_totals = _compute_contour_forces(meta, nodes, tris, Bx, By)
     az_path, b_path = _write_solution_files(mesh_path, nodes, tris, region,
                                             mu_r, Az, Bx, By, Bmag, meta,
+                                            indicator=indicator,
                                             contour_segments=contour_segments or None,
                                             contour_totals=contour_totals or None)
     print(f"Solved A_z on {nodes.shape[0]} nodes (tris={tris.shape[0]})")

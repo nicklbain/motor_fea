@@ -5,6 +5,7 @@ __pycache__/
 # Binary data artifacts
 *.npz
 *.npy
+.DS_Store
 
 # Virtual environments
 .venv/

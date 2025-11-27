@@ -6,31 +6,14 @@
     "Lx": 0.6,
     "Ly": 0.6,
     "mesh": {
-      "type": "point_cloud",
-      "fine": 0.0008,
-      "coarse": 0.004,
+      "type": "experimental",
+      "fine": 0.0004,
+      "coarse": 0.001,
       "focus_pad": 0.004,
       "focus_falloff": 0.003,
       "focus_materials": [
         "steel"
-      ],
-      "quality_min_angle": 28,
-      "field_focus": {
-        "enabled": false,
-        "direction_weight": 0,
-        "magnitude_weight": 1,
-        "indicator_gain": 100,
-        "indicator_neutral": null,
-        "scale_min": 0.2,
-        "scale_max": 5,
-        "smooth_passes": 1,
-        "size_smooth_passes": 2,
-        "ratio_limit": 1.7,
-        "indicator_clip": [
-          5,
-          95
-        ]
-      }
+      ]
     }
   },
   "defaults": {
@@ -63,13 +46,13 @@
       "shape": {
         "type": "ring",
         "center": [
-          0.2963500219604716,
-          0.3064791241846965
+          0.2964886496112797,
+          0.3070350753863574
         ],
         "outer_radius": 0.0275,
         "inner_radius": 0.026
       },
-      "group": ""
+      "group": "group-2bbv77"
     },
     {
       "id": "obj-iq3une0",
@@ -83,14 +66,14 @@
       "shape": {
         "type": "rect",
         "center": [
-          0.29648525596631403,
-          0.3312917859832152
+          0.3187877552844131,
+          0.29631202577811877
         ],
         "width": 0.005,
         "height": 0.002,
-        "angle": 0
+        "angle": -115
       },
-      "group": ""
+      "group": "group-2bbv77"
     },
     {
       "id": "obj-0z0crlj",
@@ -104,14 +87,14 @@
       "shape": {
         "type": "rect",
         "center": [
-          0.28394323400737503,
-          0.32804950023538254
+          0.321144465927314,
+          0.3090379097310131
         ],
         "width": 0.005,
         "height": 0.002,
-        "angle": 30
+        "angle": -85
       },
-      "group": ""
+      "group": "group-2bbv77"
     },
     {
       "id": "obj-b0zgg0g",
@@ -125,14 +108,14 @@
       "shape": {
         "type": "rect",
         "center": [
-          0.2749592477812865,
-          0.3191636245300462
+          0.3168879242232998,
+          0.32093549975098024
         ],
         "width": 0.005,
         "height": 0.002,
-        "angle": 60
+        "angle": -55
       },
-      "group": ""
+      "group": "group-2bbv77"
     },
     {
       "id": "obj-ccwsrhq",
@@ -146,14 +129,14 @@
       "shape": {
         "type": "rect",
         "center": [
-          0.2715767714573109,
-          0.30655260451522526
+          0.3068879548458102,
+          0.32933071174030737
         ],
         "width": 0.005,
         "height": 0.002,
-        "angle": 90
+        "angle": -25
       },
-      "group": ""
+      "group": "group-2bbv77"
     },
     {
       "id": "obj-2kf2wf3",
@@ -167,14 +150,14 @@
       "shape": {
         "type": "rect",
         "center": [
-          0.2750774965385285,
-          0.2937459142480342
+          0.29380168138183216,
+          0.3315703185182972
         ],
         "width": 0.005,
         "height": 0.002,
-        "angle": 120
+        "angle": 5
       },
-      "group": ""
+      "group": "group-2bbv77"
     },
     {
       "id": "obj-x12uuiz",
@@ -188,14 +171,14 @@
       "shape": {
         "type": "rect",
         "center": [
-          0.2839198816260846,
-          0.28499514984780683
+          0.2821285739929976,
+          0.3272433315167022
         ],
         "width": 0.005,
         "height": 0.002,
-        "angle": 150
+        "angle": 35
       },
-      "group": ""
+      "group": "group-2bbv77"
     },
     {
       "id": "obj-5hqwfvl",
@@ -209,14 +192,14 @@
       "shape": {
         "type": "rect",
         "center": [
-          0.2962157223173278,
-          0.28166965815715195
+          0.27391820815845763,
+          0.3175049288678041
         ],
         "width": 0.005,
         "height": 0.002,
-        "angle": 180
+        "angle": 65
       },
-      "group": ""
+      "group": "group-2bbv77"
     },
     {
       "id": "obj-vam1kzv",
@@ -230,14 +213,14 @@
       "shape": {
         "type": "rect",
         "center": [
-          0.3090450887399417,
-          0.2851636699925526
+          0.2716629337561198,
+          0.3044009409678641
         ],
         "width": 0.005,
         "height": 0.002,
-        "angle": -150
+        "angle": 95
       },
-      "group": ""
+      "group": "group-2bbv77"
     },
     {
       "id": "obj-t5ducvy",
@@ -251,14 +234,14 @@
       "shape": {
         "type": "rect",
         "center": [
-          0.3180938819732447,
-          0.2944132364702811
+          0.27622170261448864,
+          0.2922909134905644
         ],
         "width": 0.005,
         "height": 0.002,
-        "angle": -120
+        "angle": 125
       },
-      "group": ""
+      "group": "group-2bbv77"
     },
     {
       "id": "obj-0sopjpq",
@@ -272,14 +255,14 @@
       "shape": {
         "type": "rect",
         "center": [
-          0.3211135121410276,
-          0.30669802718658457
+          0.2860953330171385,
+          0.2843966909779866
         ],
         "width": 0.005,
         "height": 0.002,
-        "angle": -90
+        "angle": 155
       },
-      "group": ""
+      "group": "group-2bbv77"
     },
     {
       "id": "obj-v1pessf",
@@ -293,14 +276,14 @@
       "shape": {
         "type": "rect",
         "center": [
-          0.3177748678399672,
-          0.3189983988476322
+          0.2986542276880759,
+          0.28222416861602645
         ],
         "width": 0.005,
         "height": 0.002,
-        "angle": -60
+        "angle": -175
       },
-      "group": ""
+      "group": "group-2bbv77"
     },
     {
       "id": "obj-aoyd0k9",
@@ -314,21 +297,21 @@
       "shape": {
         "type": "rect",
         "center": [
-          0.30880115691264276,
-          0.3279826336791426
+          0.3105837201330335,
+          0.2865485370406715
         ],
         "width": 0.005,
         "height": 0.002,
-        "angle": -30
+        "angle": -145
       },
-      "group": ""
+      "group": "group-2bbv77"
     },
     {
       "id": "obj-2s1g3te",
-      "label": "Coil",
+      "label": "Coil 1 N - P1",
       "material": "wire",
       "params": {
-        "current": -5,
+        "current": -500,
         "mu_r": 1000
       },
       "shape": {
@@ -345,7 +328,7 @@
     },
     {
       "id": "obj-bdgrohb",
-      "label": "Coil copy",
+      "label": "Coil 1 P - P1",
       "material": "wire",
       "params": {
         "current": 500,
@@ -354,8 +337,8 @@
       "shape": {
         "type": "rect",
         "center": [
-          0.292656785407522,
-          0.3245317469346608
+          0.2926858486418079,
+          0.3245172153175178
         ],
         "width": 0.002,
         "height": 0.006,
@@ -375,11 +358,11 @@
       "shape": {
         "type": "polygon",
         "center": [
-          0.29640806039081896,
+          0.29641994719285336,
           0.3068072308774055
         ],
         "radius": 0.0232,
-        "sides": 80,
+        "sides": 4096,
         "rotation": -64.93146066040774
       },
       "group": ""
@@ -394,8 +377,8 @@
       "shape": {
         "type": "polygon",
         "center": [
-          0.29641751134946953,
-          0.30682428281627155
+          0.2964175113494762,
+          0.30682428281628055
         ],
         "vertices": [
           [
@@ -6917,7 +6900,327 @@
         ],
         "sides": 1567,
         "rotation": 0,
-        "radius": 0.022500000000034496
+        "radius": 0.02250000000003629
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-qxs1r5t",
+      "label": "Coil 2 N - P2",
+      "material": "wire",
+      "params": {
+        "current": -500,
+        "mu_r": 1000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.282249699426016,
+          0.31800354431763805
+        ],
+        "width": 0.002,
+        "height": 0.006,
+        "angle": 40
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-xu608xi",
+      "label": "Coil 2 P - P2",
+      "material": "wire",
+      "params": {
+        "current": 500,
+        "mu_r": 1000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.2878720058775029,
+          0.3227005974365742
+        ],
+        "width": 0.002,
+        "height": 0.006,
+        "angle": 40
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-stkgcg8",
+      "label": "Coil 9 N - P3",
+      "material": "wire",
+      "params": {
+        "current": -1000,
+        "mu_r": 1000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.3106083232701064,
+          0.3180608163789432
+        ],
+        "width": 0.002,
+        "height": 0.006,
+        "angle": -40
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-b6el3hr",
+      "label": "Coil 9 P - P3",
+      "material": "wire",
+      "params": {
+        "current": 1000,
+        "mu_r": 1000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.304995520321774,
+          0.32271048656142004
+        ],
+        "width": 0.002,
+        "height": 0.006,
+        "angle": -40
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-16fxjr8",
+      "label": "Coil 3 P - P3",
+      "material": "wire",
+      "params": {
+        "current": 1000,
+        "mu_r": 1000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.27841489154343324,
+          0.3062472197852941
+        ],
+        "width": 0.002,
+        "height": 0.006,
+        "angle": 80
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-4u1xp5g",
+      "label": "Coil 3 N - P3",
+      "material": "wire",
+      "params": {
+        "current": -1000,
+        "mu_r": 1000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.27963908124218245,
+          0.3135819926201921
+        ],
+        "width": 0.002,
+        "height": 0.006,
+        "angle": 80
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-jlemu71",
+      "label": "Coil 4 P - P1",
+      "material": "wire",
+      "params": {
+        "current": 500,
+        "mu_r": 1000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.28303939377996495,
+          0.2948547820085421
+        ],
+        "width": 0.002,
+        "height": 0.006,
+        "angle": 120
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-c7m675t",
+      "label": "Coil 4 N - P1",
+      "material": "wire",
+      "params": {
+        "current": -500,
+        "mu_r": 1000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.2793986134542276,
+          0.30118299810447946
+        ],
+        "width": 0.002,
+        "height": 0.006,
+        "angle": 120
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-fjuevpq",
+      "label": "Coil 5 P - P2",
+      "material": "wire",
+      "params": {
+        "current": 500,
+        "mu_r": 1000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.28688903451338266,
+          0.2914082695377277
+        ],
+        "width": 0.002,
+        "height": 0.006,
+        "angle": 160
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-2kfmcgj",
+      "label": "Coil 5 N - P2",
+      "material": "wire",
+      "params": {
+        "current": -500,
+        "mu_r": 1000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.29385731436931195,
+          0.28903386347193094
+        ],
+        "width": 0.002,
+        "height": 0.006,
+        "angle": 160
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-qtlllhh",
+      "label": "Coil 6 N - P3",
+      "material": "wire",
+      "params": {
+        "current": -1000,
+        "mu_r": 1000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.29897271301945066,
+          0.28891839145473375
+        ],
+        "width": 0.002,
+        "height": 0.006,
+        "angle": -160
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-onkds7i",
+      "label": "Coil 6 P - P3",
+      "material": "wire",
+      "params": {
+        "current": 1000,
+        "mu_r": 1000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.30598148247509027,
+          0.29151610823336227
+        ],
+        "width": 0.002,
+        "height": 0.006,
+        "angle": -160
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-88kyr8v",
+      "label": "Coil 7 P - P1",
+      "material": "wire",
+      "params": {
+        "current": 500,
+        "mu_r": 1000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.3135014979489139,
+          0.30126468754495417
+        ],
+        "width": 0.002,
+        "height": 0.006,
+        "angle": -120
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-tgiznnb",
+      "label": "Coil 7 N - P1",
+      "material": "wire",
+      "params": {
+        "current": -500,
+        "mu_r": 1000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.3097840607087057,
+          0.29475485067319585
+        ],
+        "width": 0.002,
+        "height": 0.006,
+        "angle": -120
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-hkk55c5",
+      "label": "Coil 8 P - P2",
+      "material": "wire",
+      "params": {
+        "current": 500,
+        "mu_r": 1000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.31311657112988706,
+          0.3134485030382842
+        ],
+        "width": 0.002,
+        "height": 0.006,
+        "angle": -80
+      },
+      "group": ""
+    },
+    {
+      "id": "obj-oxe8rrh",
+      "label": "Coil 8 N - P2",
+      "material": "wire",
+      "params": {
+        "current": -500,
+        "mu_r": 1000
+      },
+      "shape": {
+        "type": "rect",
+        "center": [
+          0.3145302552461135,
+          0.30629066282262096
+        ],
+        "width": 0.002,
+        "height": 0.006,
+        "angle": -80
       },
       "group": ""
     }
