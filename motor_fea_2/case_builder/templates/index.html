@@ -8,10 +8,6 @@
 </head>
 <body>
   <div class="app-shell">
-    <header>
-      <h1>Case Builder</h1>
-      <p>Sketch rectangles, circles, rings, or regular polygons, assign materials (or mark a contour), and save the definition directly into a case folder.</p>
-    </header>
     <main>
       <section class="controls">
         <div class="panel">
@@ -105,8 +101,20 @@
             </div>
             <p class="hint">Creates a hex-like fill that favors equilateral triangles; uses the fine pitch within ~1&nbsp;cm of materials and grades smoothly to the coarse pitch.</p>
           </div>
-          <div class="mesh-actions">
-            <button id="adaptiveRunBtn" type="button" disabled>Mesh</button>
+          <div class="mesh-solve-options">
+            <span>Solve options (applies to all mesh modes)</span>
+            <label class="inline">
+              <input type="checkbox" id="useBhCurvesCheckbox" checked>
+              Use material BH curves (nonlinear solve)
+            </label>
+            <label class="inline">
+              <input type="checkbox" id="solveIndicatorCheckbox" checked>
+              Solve for indicator/alpha (needed for B-field driven remesh)
+            </label>
+            <label class="inline">
+              <input type="checkbox" id="skipMeshIfCleanCheckbox">
+              Remesh even if definition unchanged (slower)
+            </label>
           </div>
           <div id="uniformMeshControls" class="mesh-controls">
             <div class="grid-inputs">
@@ -114,6 +122,9 @@
               <label>Ny <input id="gridNy" type="number" min="4" step="1"></label>
             </div>
             <p class="hint">Uniform meshes are preserved for backward compatibility. Adaptive mode is recommended.</p>
+          </div>
+          <div class="mesh-actions">
+            <button type="button" id="meshBtn" class="run-btn">Mesh</button>
           </div>
         </div>
         <div class="panel">
@@ -227,6 +238,15 @@
               </div>
               <div class="param-fields" data-material="steel">
                 <label>µr <input id="steelMu" type="number" step="1"></label>
+                <label>Sat B (T, optional) <input id="steelBSat" type="number" step="0.01" placeholder="e.g. 1.6"></label>
+                <div class="bh-controls">
+                  <label>B–H CSV <input id="steelBhFile" type="file" accept=".csv,text/csv"></label>
+                  <div class="button-row tight">
+                    <button type="button" id="steelInferBhBtn" class="secondary">Infer curve</button>
+                    <button type="button" id="steelClearBhBtn" class="secondary">Clear curve</button>
+                  </div>
+                  <p id="steelBhSummary" class="hint"></p>
+                </div>
               </div>
               <div class="param-fields" data-material="air">
                 <label>µr <input id="airMu" type="number" step="0.01"></label>
@@ -238,17 +258,22 @@
           </div>
         </div>
         <div class="panel">
-          <h2>Output</h2>
-          <div class="button-row">
-            <button id="saveCaseBtn">Save to folder</button>
-            <button id="runCaseBtn">Run case</button>
-            <button id="downloadBtn">Download JSON</button>
+          <h2>Phase currents</h2>
+          <p class="hint">Set P1 and P2; P3 is auto-filled as -(P1 + P2). Applies to coils named like "Coil 1 P - P1".</p>
+          <div class="phase-grid">
+            <label>Phase 1 (A) <input id="phase1Current" type="number" step="10"></label>
+            <label>Phase 2 (A) <input id="phase2Current" type="number" step="10"></label>
+            <label>Phase 3 (auto A) <input id="phase3Current" type="number" readonly></label>
           </div>
-          <p id="statusLine" class="status"></p>
+          <div class="button-row">
+            <button id="applyPhaseBtn" type="button">Apply to coils</button>
+            <button id="readPhaseBtn" type="button" class="secondary">Read from coils</button>
+          </div>
         </div>
       </section>
       <section class="canvas-panel">
-        <div class="canvas-toolbar" aria-label="Canvas view controls">
+      <div class="canvas-toolbar" aria-label="Canvas view controls">
+        <div class="toolbar-left">
           <span class="zoom-label">Zoom: <strong id="zoomLevelLabel">100%</strong></span>
           <div class="zoom-controls">
             <button type="button" id="zoomResetBtn" class="zoom-btn">Reset</button>
@@ -256,10 +281,13 @@
             <button type="button" id="zoomInBtn" class="zoom-btn" aria-label="Zoom in">+</button>
           </div>
         </div>
-        <canvas id="builderCanvas" width="720" height="720"></canvas>
-        <div class="canvas-hint">Scroll or pinch to zoom, drag blank space to pan, and hold Shift while drawing to constrain aspect.</div>
-      </section>
-    </main>
+        <p id="statusLine" class="status toolbar-status"></p>
+        <button type="button" id="runCaseBtn" class="run-btn">Mesh &amp; Run</button>
+      </div>
+      <canvas id="builderCanvas" width="720" height="720"></canvas>
+      <div class="canvas-hint">Scroll or pinch to zoom, drag blank space to pan, and hold Shift while drawing to constrain aspect.</div>
+    </section>
+  </main>
   </div>
   <script>
     window.__BOOTSTRAP__ = {{ bootstrap | tojson }};

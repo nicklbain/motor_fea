@@ -1,6 +1,8 @@
 const bootstrap = window.__BOOTSTRAP__ || {};
 const BASE_GRID = bootstrap.defaultGrid || { Nx: 120, Ny: 120, Lx: 1, Ly: 1 };
 const DEFAULT_GRID_SANITIZED = sanitizeGrid(BASE_GRID, BASE_GRID);
+const BASE_SOLVE = bootstrap.defaultSolve || { indicator: true, skip_mesh_if_clean: true, use_bh_curves: true };
+const DEFAULT_SOLVE_SANITIZED = sanitizeSolve(BASE_SOLVE);
 const MATERIAL_DEFAULTS = {
   magnet: { label: 'Permanent Magnet', color: '#e4572e', params: { mu_r: 1.05, Mx: 0, My: 800000 } },
   steel: { label: 'Steel', color: '#2e86de', params: { mu_r: 1000 } },
@@ -14,6 +16,7 @@ const state = {
   caseName: bootstrap.defaultCase || '',
   definitionName: '',
   grid: deepCopy(DEFAULT_GRID_SANITIZED),
+  solve: deepCopy(DEFAULT_SOLVE_SANITIZED),
   objects: [],
   selectedId: null,
   selectedIds: [],
@@ -31,6 +34,7 @@ const state = {
   runBusy: false,
   adaptiveBusy: false,
   runStartedAt: null,
+  phaseCurrents: { 1: null, 2: null, 3: null },
   debug: {
     showDxfPoints: false,
     previewPoints: null,
@@ -518,7 +522,7 @@ function cacheElements() {
   elements.meshFocusMagnet = document.getElementById('meshFocusMagnet');
   elements.meshFocusSteel = document.getElementById('meshFocusSteel');
   elements.meshFocusWire = document.getElementById('meshFocusWire');
-  elements.meshBtn = document.getElementById('adaptiveRunBtn');
+  elements.meshBtn = document.getElementById('meshBtn');
   elements.fieldFocusEnabled = document.getElementById('fieldFocusEnabled');
   elements.fieldDirectionWeight = document.getElementById('fieldDirectionWeight');
   elements.fieldMagnitudeWeight = document.getElementById('fieldMagnitudeWeight');
@@ -532,6 +536,9 @@ function cacheElements() {
   elements.fieldRatioLimit = document.getElementById('fieldRatioLimit');
   elements.fieldSizeMin = document.getElementById('fieldSizeMin');
   elements.fieldSizeMax = document.getElementById('fieldSizeMax');
+  elements.useBhCurvesCheckbox = document.getElementById('useBhCurvesCheckbox');
+  elements.solveIndicatorCheckbox = document.getElementById('solveIndicatorCheckbox');
+  elements.skipMeshIfCleanCheckbox = document.getElementById('skipMeshIfCleanCheckbox');
   elements.gradedMeshControls = document.getElementById('gradedMeshControls');
   elements.experimentalMeshControls = document.getElementById('experimentalMeshControls');
   elements.uniformMeshControls = document.getElementById('uniformMeshControls');
@@ -587,6 +594,11 @@ function cacheElements() {
     },
     steel: {
       mu: document.getElementById('steelMu'),
+      bSat: document.getElementById('steelBSat'),
+      bhFile: document.getElementById('steelBhFile'),
+      bhSummary: document.getElementById('steelBhSummary'),
+      inferBtn: document.getElementById('steelInferBhBtn'),
+      clearBtn: document.getElementById('steelClearBhBtn'),
     },
     air: {
       mu: document.getElementById('airMu'),
@@ -595,6 +607,13 @@ function cacheElements() {
       current: document.getElementById('wireCurrent'),
     },
   };
+  elements.phaseInputs = {
+    p1: document.getElementById('phase1Current'),
+    p2: document.getElementById('phase2Current'),
+    p3: document.getElementById('phase3Current'),
+  };
+  elements.applyPhaseBtn = document.getElementById('applyPhaseBtn');
+  elements.readPhaseBtn = document.getElementById('readPhaseBtn');
   elements.statusLine = document.getElementById('statusLine');
   elements.canvas = document.getElementById('builderCanvas');
   elements.zoomInBtn = document.getElementById('zoomInBtn');
@@ -677,6 +696,24 @@ function bindEvents() {
   if (elements.fieldFocusEnabled) {
     elements.fieldFocusEnabled.addEventListener('change', () => updateGridFromInputs());
   }
+  if (elements.useBhCurvesCheckbox) {
+    elements.useBhCurvesCheckbox.addEventListener('change', () => {
+      state.solve.use_bh_curves = !!elements.useBhCurvesCheckbox.checked;
+      markDirty();
+    });
+  }
+  if (elements.solveIndicatorCheckbox) {
+    elements.solveIndicatorCheckbox.addEventListener('change', () => {
+      state.solve.indicator = !!elements.solveIndicatorCheckbox.checked;
+      markDirty();
+    });
+  }
+  if (elements.skipMeshIfCleanCheckbox) {
+    elements.skipMeshIfCleanCheckbox.addEventListener('change', () => {
+      state.solve.skip_mesh_if_clean = !elements.skipMeshIfCleanCheckbox.checked;
+      markDirty();
+    });
+  }
   elements.toolButtons.forEach((btn) => {
     btn.addEventListener('click', () => {
       setActiveTool(btn.dataset.tool);
@@ -731,14 +768,39 @@ function bindEvents() {
   elements.paramInputs.magnet.mx.addEventListener('input', () => updateParam('magnet', 'Mx', elements.paramInputs.magnet.mx.value));
   elements.paramInputs.magnet.my.addEventListener('input', () => updateParam('magnet', 'My', elements.paramInputs.magnet.my.value));
   elements.paramInputs.steel.mu.addEventListener('input', () => updateParam('steel', 'mu_r', elements.paramInputs.steel.mu.value));
+  elements.paramInputs.steel.bSat.addEventListener('input', () => updateBhSat('steel', elements.paramInputs.steel.bSat.value));
+  elements.paramInputs.steel.bhFile.addEventListener('change', (event) => {
+    const file = event.target.files && event.target.files[0];
+    if (file) {
+      importBhCsv(file, 'steel');
+    }
+  });
+  elements.paramInputs.steel.inferBtn.addEventListener('click', () => inferBhCurveForSteel());
+  elements.paramInputs.steel.clearBtn.addEventListener('click', () => clearBhCurve('steel'));
   elements.paramInputs.air.mu.addEventListener('input', () => updateParam('air', 'mu_r', elements.paramInputs.air.mu.value));
   elements.paramInputs.wire.current.addEventListener('input', () => updateParam('wire', 'current', elements.paramInputs.wire.current.value));
-  elements.saveCaseBtn.addEventListener('click', saveCaseDefinition);
+  ['p1', 'p2'].forEach((key) => {
+    const input = elements.phaseInputs?.[key];
+    if (input) {
+      input.addEventListener('input', onPhaseInputsChanged);
+    }
+  });
+  if (elements.applyPhaseBtn) {
+    elements.applyPhaseBtn.addEventListener('click', applyPhaseCurrents);
+  }
+  if (elements.readPhaseBtn) {
+    elements.readPhaseBtn.addEventListener('click', () => hydratePhaseCurrentsFromScene({ notify: true }));
+  }
+  if (elements.saveCaseBtn) {
+    elements.saveCaseBtn.addEventListener('click', saveCaseDefinition);
+  }
   elements.runCaseBtn.addEventListener('click', runCasePipeline);
   if (elements.meshBtn) {
     elements.meshBtn.addEventListener('click', runMeshPipeline);
   }
-  elements.downloadBtn.addEventListener('click', downloadDefinition);
+  if (elements.downloadBtn) {
+    elements.downloadBtn.addEventListener('click', downloadDefinition);
+  }
   if (elements.buildDxfSolidBtn) {
     elements.buildDxfSolidBtn.addEventListener('click', importAndBuildDxf);
   }
@@ -792,6 +854,7 @@ function renderAll() {
   renderShapeList();
   updateInspector();
   renderRotatePivotOptions();
+  renderPhaseHelper();
   updateZoomLabel();
   scheduleDraw();
 }
@@ -836,6 +899,15 @@ function updateGridInputs() {
   }
   if (elements.gridQualityAngle) {
     elements.gridQualityAngle.value = mesh.quality_min_angle ?? fallbackMesh.quality_min_angle ?? '';
+  }
+  if (elements.useBhCurvesCheckbox) {
+    elements.useBhCurvesCheckbox.checked = state.solve.use_bh_curves !== false;
+  }
+  if (elements.solveIndicatorCheckbox) {
+    elements.solveIndicatorCheckbox.checked = !!state.solve.indicator;
+  }
+  if (elements.skipMeshIfCleanCheckbox) {
+    elements.skipMeshIfCleanCheckbox.checked = !state.solve.skip_mesh_if_clean;
   }
   const focusMaterials = Array.isArray(mesh.focus_materials)
     ? mesh.focus_materials
@@ -1203,6 +1275,7 @@ function newCase(name) {
   state.caseName = name;
   state.definitionName = name;
   state.grid = deepCopy(DEFAULT_GRID_SANITIZED);
+  state.solve = deepCopy(DEFAULT_SOLVE_SANITIZED);
   state.lastAdaptiveMesh = state.grid.mesh?.type === 'uniform' ? null : deepCopy(state.grid.mesh);
   state.objects = [];
   state.selectedId = null;
@@ -1212,6 +1285,7 @@ function newCase(name) {
   state.lastSolveSnapshot = null;
   state.meshVersion = 0;
   state.lastSolvedMeshVersion = 0;
+  state.phaseCurrents = { 1: null, 2: null, 3: null };
   state.hasBField = false;
   elements.caseNameInput.value = name;
   elements.definitionNameInput.value = name;
@@ -1236,12 +1310,15 @@ async function loadCase(caseName) {
     state.caseName = data.case || caseName;
     state.definitionName = def.name || state.caseName;
     state.grid = sanitizeGrid(def.grid || {}, BASE_GRID);
+    state.solve = sanitizeSolve(def.solve, DEFAULT_SOLVE_SANITIZED);
     if (state.grid.mesh?.type !== 'uniform') {
       state.lastAdaptiveMesh = deepCopy(state.grid.mesh);
     } else if (!state.lastAdaptiveMesh && DEFAULT_GRID_SANITIZED.mesh?.type !== 'uniform') {
       state.lastAdaptiveMesh = deepCopy(DEFAULT_GRID_SANITIZED.mesh);
     }
     state.objects = (def.objects || []).map((obj, idx) => hydrateObject(obj, idx));
+    state.phaseCurrents = { 1: null, 2: null, 3: null };
+    hydratePhaseCurrentsFromScene();
     resetView({ schedule: false });
     state.selectedId = state.objects.length ? state.objects[0].id : null;
     state.selectedIds = state.selectedId ? [state.selectedId] : [];
@@ -1330,6 +1407,25 @@ function readNonNegativeInt(value, fallback, defaultValue = 0) {
     return Math.floor(defaultValue);
   }
   return 0;
+}
+
+function sanitizeSolve(solve, fallback = BASE_SOLVE) {
+  const base =
+    typeof fallback === 'object' && fallback !== null
+      ? fallback
+      : { indicator: true, skip_mesh_if_clean: true, use_bh_curves: true };
+  const src = typeof solve === 'object' && solve !== null ? solve : {};
+  const indicator =
+    src.indicator === undefined || src.indicator === null ? !!base.indicator : !!src.indicator;
+  const skipMesh =
+    src.skip_mesh_if_clean === undefined || src.skip_mesh_if_clean === null
+      ? !!base.skip_mesh_if_clean
+      : !!src.skip_mesh_if_clean;
+  const useBh =
+    src.use_bh_curves === undefined || src.use_bh_curves === null
+      ? !!base.use_bh_curves
+      : !!src.use_bh_curves;
+  return { indicator, skip_mesh_if_clean: skipMesh, use_bh_curves: useBh };
 }
 
 function sanitizeGrid(grid, fallback = BASE_GRID) {
@@ -1676,6 +1772,44 @@ function renderRotatePivotOptions() {
   state.rotatePivot = elements.rotatePivot.value;
 }
 
+function computePhase3Current(p1, p2) {
+  if (!Number.isFinite(p1) || !Number.isFinite(p2)) return null;
+  return -(p1 + p2);
+}
+
+function renderPhaseHelper() {
+  if (!elements.phaseInputs) return;
+  const p1Input = elements.phaseInputs.p1;
+  const p2Input = elements.phaseInputs.p2;
+  const p3Input = elements.phaseInputs.p3;
+  if (p1Input) {
+    p1Input.value = Number.isFinite(state.phaseCurrents[1]) ? state.phaseCurrents[1] : '';
+  }
+  if (p2Input) {
+    p2Input.value = Number.isFinite(state.phaseCurrents[2]) ? state.phaseCurrents[2] : '';
+  }
+  const computed = computePhase3Current(state.phaseCurrents[1], state.phaseCurrents[2]);
+  state.phaseCurrents[3] = Number.isFinite(computed) ? computed : null;
+  if (p3Input) {
+    p3Input.value = Number.isFinite(state.phaseCurrents[3]) ? state.phaseCurrents[3] : '';
+  }
+  if (elements.applyPhaseBtn) {
+    const ready = Number.isFinite(state.phaseCurrents[1]) && Number.isFinite(state.phaseCurrents[2]);
+    elements.applyPhaseBtn.disabled = !ready;
+  }
+}
+
+function onPhaseInputsChanged() {
+  const raw1 = elements.phaseInputs?.p1 ? elements.phaseInputs.p1.value.trim() : '';
+  const raw2 = elements.phaseInputs?.p2 ? elements.phaseInputs.p2.value.trim() : '';
+  const p1 = raw1 === '' ? null : Number(raw1);
+  const p2 = raw2 === '' ? null : Number(raw2);
+  state.phaseCurrents[1] = Number.isFinite(p1) ? p1 : null;
+  state.phaseCurrents[2] = Number.isFinite(p2) ? p2 : null;
+  state.phaseCurrents[3] = computePhase3Current(state.phaseCurrents[1], state.phaseCurrents[2]);
+  renderPhaseHelper();
+}
+
 function updateInspector() {
   const shape = getSelectedShape();
   if (!shape) {
@@ -1733,6 +1867,8 @@ function updateInspector() {
   elements.paramInputs.magnet.mx.value = shape.material === 'magnet' && params.Mx !== undefined ? params.Mx : '';
   elements.paramInputs.magnet.my.value = shape.material === 'magnet' && params.My !== undefined ? params.My : '';
   elements.paramInputs.steel.mu.value = shape.material === 'steel' && params.mu_r !== undefined ? params.mu_r : '';
+  elements.paramInputs.steel.bSat.value = shape.material === 'steel' && params.b_sat !== undefined ? params.b_sat : '';
+  renderBhSummary(shape.material === 'steel' ? params.bh_curve : null);
   elements.paramInputs.air.mu.value = shape.material === 'air' && params.mu_r !== undefined ? params.mu_r : '';
   elements.paramInputs.wire.current.value = shape.material === 'wire' && params.current !== undefined ? params.current : '';
 }
@@ -1892,6 +2028,87 @@ function rotateSelectedShapes() {
   setStatus(`Rotated ${targets.length} shape(s) by ${delta.toFixed(2)}°`, 'info');
 }
 
+function parseCoilPhaseMetadata(obj) {
+  if (!obj || obj.material !== 'wire' || !obj.label) return null;
+  const label = String(obj.label);
+  const sideMatch = label.match(/Coil\s*\d+\s*([PN])\b/i);
+  const phaseMatches = Array.from(label.matchAll(/P\s*([123])\b/gi));
+  const phaseMatch = phaseMatches.length ? phaseMatches[phaseMatches.length - 1] : null;
+  if (!sideMatch || !phaseMatch) return null;
+  const side = sideMatch[1].toUpperCase();
+  const phaseNum = parseInt(phaseMatch[1], 10);
+  if (!Number.isFinite(phaseNum)) return null;
+  return { side, phase: phaseNum };
+}
+
+function detectPhaseCurrentsFromObjects(objs = state.objects) {
+  const detected = { 1: null, 2: null, 3: null };
+  objs.forEach((obj) => {
+    const meta = parseCoilPhaseMetadata(obj);
+    if (!meta) return;
+    const raw = Number(obj.params?.current);
+    if (!Number.isFinite(raw)) return;
+    const phaseValue = meta.side === 'N' ? -raw : raw;
+    const existing = detected[meta.phase];
+    if (!Number.isFinite(existing) || meta.side === 'P') {
+      detected[meta.phase] = phaseValue;
+    }
+  });
+  return detected;
+}
+
+function hydratePhaseCurrentsFromScene(options = {}) {
+  const { notify = false } = options;
+  const detected = detectPhaseCurrentsFromObjects(state.objects);
+  state.phaseCurrents[1] = Number.isFinite(detected[1]) ? detected[1] : null;
+  state.phaseCurrents[2] = Number.isFinite(detected[2]) ? detected[2] : null;
+  state.phaseCurrents[3] = computePhase3Current(state.phaseCurrents[1], state.phaseCurrents[2]);
+  renderPhaseHelper();
+  if (notify) {
+    const found = [1, 2, 3].filter((p) => Number.isFinite(detected[p]));
+    if (found.length) {
+      const parts = found.map((p) => `P${p}=${detected[p]}`);
+      setStatus(`Read phase currents from coils (${parts.join(', ')}).`, 'info');
+    } else {
+      setStatus('No coils with phase labels (P1/P2/P3) found to read currents from.', 'error');
+    }
+  }
+  return detected;
+}
+
+function applyPhaseCurrents() {
+  const p1 = state.phaseCurrents[1];
+  const p2 = state.phaseCurrents[2];
+  if (!Number.isFinite(p1) || !Number.isFinite(p2)) {
+    setStatus('Enter numeric currents for Phase 1 and Phase 2 before applying.', 'error');
+    return;
+  }
+  const p3 = computePhase3Current(p1, p2);
+  state.phaseCurrents[3] = Number.isFinite(p3) ? p3 : null;
+  const targets = { 1: p1, 2: p2, 3: state.phaseCurrents[3] };
+  let updated = 0;
+  state.objects.forEach((obj) => {
+    const meta = parseCoilPhaseMetadata(obj);
+    if (!meta) return;
+    const phaseValue = targets[meta.phase];
+    if (!Number.isFinite(phaseValue)) return;
+    obj.params = obj.params || {};
+    obj.params.current = meta.side === 'N' ? -phaseValue : phaseValue;
+    updated += 1;
+  });
+  if (updated > 0) {
+    markDirty();
+    updateInspector();
+    renderShapeList();
+    scheduleDraw();
+  }
+  const parts = Object.entries(targets)
+    .filter(([, val]) => Number.isFinite(val))
+    .map(([phase, val]) => `P${phase}=${val}`);
+  setStatus(`Applied phase currents (${parts.join(', ')}) to ${updated} coil${updated === 1 ? '' : 's'}.`, 'success');
+  renderPhaseHelper();
+}
+
 function uniqueId() {
   return `obj-${Math.random().toString(36).slice(2, 9)}`;
 }
@@ -1977,6 +2194,124 @@ function updateParam(material, key, rawValue) {
   markDirty();
 }
 
+function updateBhSat(material, rawValue) {
+  const shape = getSelectedShape();
+  if (!shape || shape.material !== material) return;
+  const value = parseFloat(rawValue);
+  shape.params = shape.params || {};
+  if (Number.isNaN(value)) {
+    delete shape.params.b_sat;
+  } else {
+    shape.params.b_sat = value;
+  }
+  markDirty();
+  renderBhSummary(shape.params?.bh_curve);
+}
+
+function clearBhCurve(material) {
+  const shape = getSelectedShape();
+  if (!shape || shape.material !== material) return;
+  if (shape.params) {
+    delete shape.params.bh_curve;
+  }
+  if (elements.paramInputs.steel?.bhFile) {
+    elements.paramInputs.steel.bhFile.value = '';
+  }
+  renderBhSummary(null);
+  markDirty();
+}
+
+function parseBhCsvText(text) {
+  const lines = text.split(/\r?\n/);
+  const points = [];
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const parts = line.split(/[,;\s]+/).filter(Boolean);
+    if (parts.length < 2) {
+      continue;
+    }
+    const b = Number(parts[0]);
+    const h = Number(parts[1]);
+    if (!Number.isFinite(b) || !Number.isFinite(h)) {
+      // skip header-ish rows
+      continue;
+    }
+    points.push([Math.abs(b), Math.abs(h)]);
+  }
+  if (points.length < 2) {
+    throw new Error('CSV must have at least two rows of numeric B,H pairs');
+  }
+  // Sort and drop duplicate B entries.
+  points.sort((a, b) => a[0] - b[0]);
+  const deduped = [];
+  let lastB = null;
+  for (const [b, h] of points) {
+    if (lastB !== null && Math.abs(b - lastB) < 1e-12) continue;
+    deduped.push([b, h]);
+    lastB = b;
+  }
+  if (deduped.length < 2) {
+    throw new Error('B–H data collapsed to <2 unique B values');
+  }
+  return deduped;
+}
+
+function renderBhSummary(curve) {
+  if (!elements.paramInputs.steel?.bhSummary) return;
+  if (!curve || !Array.isArray(curve.points)) {
+    elements.paramInputs.steel.bhSummary.textContent = 'No B–H curve attached';
+    return;
+  }
+  const pts = curve.points;
+  const bMax = Math.max(...pts.map((p) => p[0]));
+  const src = curve.source || 'custom';
+  elements.paramInputs.steel.bhSummary.textContent = `B–H: ${pts.length} pts, B_max=${bMax.toFixed(3)} T (source: ${src})`;
+}
+
+function importBhCsv(file, material) {
+  const shape = getSelectedShape();
+  if (!shape || shape.material !== material) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const points = parseBhCsvText(String(reader.result || ''));
+      shape.params = shape.params || {};
+      shape.params.bh_curve = { points, source: 'csv' };
+      renderBhSummary(shape.params.bh_curve);
+      markDirty();
+      setStatus(`Loaded ${points.length} BH points from ${file.name}`, 'success');
+    } catch (err) {
+      console.error(err);
+      setStatus(`BH CSV error: ${err.message || err}`, 'error');
+    }
+  };
+  reader.onerror = () => {
+    setStatus(`Failed to read ${file.name}`, 'error');
+  };
+  reader.readAsText(file);
+}
+
+function inferBhCurveForSteel() {
+  const shape = getSelectedShape();
+  if (!shape || shape.material !== 'steel') return;
+  const mu = Number(elements.paramInputs.steel.mu.value) || Number(shape.params?.mu_r) || 1000;
+  const bSat = Number(elements.paramInputs.steel.bSat.value) || Number(shape.params?.b_sat) || 1.6;
+  const hSat = bSat / (4e-7 * Math.PI * Math.max(mu, 1));
+  const tailB = bSat + 0.5;
+  const tailH = hSat + (tailB - bSat) / (4e-7 * Math.PI);
+  const points = [
+    [0, 0],
+    [bSat, hSat],
+    [tailB, tailH],
+  ];
+  shape.params = shape.params || {};
+  shape.params.b_sat = bSat;
+  shape.params.bh_curve = { points, source: 'inferred', mu_r_linear: mu };
+  renderBhSummary(shape.params.bh_curve);
+  markDirty();
+  setStatus(`Inferred BH curve from μr=${mu} and B_sat=${bSat}T`, 'info');
+}
 function updateSelectedMaterial(material) {
   const shape = getSelectedShape();
   if (!shape || !MATERIAL_DEFAULTS[material]) return;
@@ -2961,6 +3296,7 @@ function serializeDefinition() {
   return {
     name: elements.definitionNameInput.value.trim() || state.caseName || 'new_case',
     grid: state.grid,
+    solve: state.solve,
     defaults,
     objects: state.objects.map((obj) => ({
       id: obj.id,
@@ -3308,23 +3644,11 @@ function evaluateRunState() {
   if (state.runBusy || state.adaptiveBusy) {
     return { ok: false, reason: 'A job is currently running.' };
   }
-  if (state.dirty) {
-    return { ok: true, reason: '' };
+  const caseName = elements.caseNameInput?.value.trim() || state.caseName;
+  if (!caseName) {
+    return { ok: false, reason: 'Enter a case name first.' };
   }
-  const fingerprint = fingerprintDefinition(serializeDefinition());
-  const lastSolve = state.lastSolveSnapshot;
-  const meshVersion = state.meshVersion ?? 0;
-  const solvedVersion = state.lastSolvedMeshVersion ?? 0;
-  if (!lastSolve) {
-    return { ok: true, reason: '' };
-  }
-  if (meshVersion > solvedVersion) {
-    return { ok: true, reason: '' };
-  }
-  if (lastSolve.fingerprint && lastSolve.fingerprint !== fingerprint) {
-    return { ok: true, reason: '' };
-  }
-  return { ok: false, reason: 'No changes since last solve.' };
+  return { ok: true, reason: '' };
 }
 
 function updateRunButtonState() {
@@ -3344,14 +3668,29 @@ function updateBFieldToggleAvailability() {
   elements.fieldFocusEnabled.title = has ? '' : 'Solve once before using B-field driven refinement.';
 }
 
-function summarizeSteps(steps) {
-  if (!Array.isArray(steps) || !steps.length) return '';
-  return steps
-    .map((step) => {
-      const label = step.step || 'step';
-      return `${label}: ${step.success ? 'ok' : 'failed'}`;
-    })
-    .join(' | ');
+function summarizeSteps(steps, options = {}) {
+  const { includeDurations = false, skippedMesh = false } = options;
+  const summaryParts = [];
+  if (skippedMesh) {
+    summaryParts.push('mesh: skipped');
+  }
+  if (!Array.isArray(steps) || !steps.length) return summaryParts.join(' | ');
+  steps.forEach((step) => {
+    const label = step.step || 'step';
+    const parts = [`${label}: ${step.success ? 'ok' : 'failed'}`];
+    if (includeDurations && step.duration_ms !== undefined && step.duration_ms !== null) {
+      const durationLabel = formatDuration(step.duration_ms);
+      if (durationLabel) {
+        parts.push(`elapsed ${durationLabel}`);
+      }
+    }
+    summaryParts.push(parts.join(' · '));
+  });
+  return summaryParts.join(' | ');
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function runCasePipeline() {
@@ -3363,30 +3702,57 @@ async function runCasePipeline() {
   const definition = serializeDefinition();
   const fingerprint = fingerprintDefinition(definition);
   setRunButtonBusy(true);
-  setStatus('Saving case and running pipeline...', 'info');
+  setStatus('Saving case, meshing, then solving...', 'info');
   startRunTimer();
   emitBuilderEvent('runStarted', { caseName, definition });
   try {
-    const response = await fetch(`/api/case/${encodeURIComponent(caseName)}/run`, {
+    const startResponse = await fetch(`/api/case/${encodeURIComponent(caseName)}/run-async`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(definition),
     });
-    const raw = await response.text();
-    let data = null;
-    if (raw) {
-      try {
-        data = JSON.parse(raw);
-      } catch (parseErr) {
-        console.warn('Failed to parse run response JSON', parseErr);
+    if (!startResponse.ok) {
+      throw new Error(await startResponse.text());
+    }
+    const startData = await startResponse.json();
+    const jobId = startData.job_id;
+    if (!jobId) {
+      throw new Error('Run did not return a job id.');
+    }
+    setStatus('Queued... starting job.', 'info');
+    let finalJob = null;
+    while (true) {
+      await sleep(1500);
+      const statusResp = await fetch(`/api/job/${jobId}/status`);
+      if (!statusResp.ok) {
+        throw new Error(await statusResp.text());
+      }
+      const job = await statusResp.json();
+      finalJob = job;
+      if (job.status === 'queued') {
+        setStatus('Queued...', 'info');
+        continue;
+      }
+      if (job.status === 'running') {
+        const stepSummary = summarizeSteps(job.result?.steps || job.steps, { includeDurations: true, skippedMesh: job.result?.skipped_mesh });
+        const label = stepSummary ? `Running... ${stepSummary}` : 'Running...';
+        setStatus(label, 'info');
+        continue;
+      }
+      if (job.status === 'completed') break;
+      if (job.status === 'failed') {
+        const elapsedMs = stopRunTimer();
+        const elapsedLabel = formatDuration(elapsedMs);
+        const timing = elapsedLabel ? ` after ${elapsedLabel}` : '';
+        throw new Error(job.error || `Run failed${timing}`);
       }
     }
-    if (!response.ok) {
-      const message =
-        (data && (data.error || data.message)) ||
-        raw ||
-        `Run failed with status ${response.status}`;
-      throw new Error(message);
+    const data = finalJob?.result;
+    if (!data || !data.succeeded) {
+      const elapsedMs = stopRunTimer();
+      const elapsedLabel = formatDuration(elapsedMs);
+      const timing = elapsedLabel ? ` after ${elapsedLabel}` : '';
+      throw new Error((finalJob && finalJob.error) || 'Run failed' + timing);
     }
     state.caseName = data.case || caseName;
     state.definitionName = definition.name;
@@ -3395,7 +3761,10 @@ async function runCasePipeline() {
       caseName: state.caseName,
       fingerprint,
     };
-    state.meshVersion = (state.meshVersion || 0) + 1;
+    const skippedMesh = !!data.skipped_mesh;
+    if (!skippedMesh) {
+      state.meshVersion = (state.meshVersion || 0) + 1;
+    }
     state.lastSolvedMeshVersion = state.meshVersion;
     state.lastSolveSnapshot = {
       caseName: state.caseName,
@@ -3406,12 +3775,11 @@ async function runCasePipeline() {
     if (!added) {
       renderCaseSelect();
     }
-    const summary = summarizeSteps(data.steps);
+    const summary = summarizeSteps(data.steps, { includeDurations: true, skippedMesh });
     const elapsedMs = stopRunTimer();
     const elapsedLabel = formatDuration(elapsedMs);
-    const suffixParts = [];
-    if (summary) suffixParts.push(summary);
-    if (elapsedLabel) suffixParts.push(`elapsed ${elapsedLabel}`);
+    const suffixParts = summary ? [summary] : [];
+    if (elapsedLabel) suffixParts.push(`total ${elapsedLabel}`);
     const suffix = suffixParts.length ? ` (${suffixParts.join(' · ')})` : '';
     setStatus(`Run complete${suffix}.`, 'success');
     emitBuilderEvent('runCompleted', {
@@ -3505,7 +3873,7 @@ async function runMeshPipeline() {
     };
     updateAdaptiveButtonState();
     updateRunButtonState();
-    const summary = summarizeSteps(data.steps);
+    const summary = summarizeSteps(data.steps, { includeDurations: true });
     const suffix = summary ? ` (${summary})` : '';
     const elapsedMs = stopRunTimer();
     const elapsedLabel = formatDuration(elapsedMs);

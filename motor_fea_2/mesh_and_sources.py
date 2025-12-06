@@ -35,6 +35,7 @@ except Exception:  # noqa: BLE001
 
 from field_adapt import FieldAdaptError, build_axes_from_field
 AIR, PMAG, STEEL = 0, 1, 2
+MU0 = 4e-7 * math.pi
 UNSTRUCTURED_MESH_TYPES = {"point_cloud", "pointcloud", "delaunay", "unstructured", "experimental", "equilateral"}
 # Large explicit polygons are downsampled to keep overlap clipping affordable.
 MAX_EXPLICIT_POLYGON_SIDES = 256
@@ -1758,6 +1759,30 @@ def build_fields_from_definition(nodes, tris, LxLy, definition, *,
     Mx = np.zeros(Ne, dtype=float)
     My = np.zeros(Ne, dtype=float)
     Jz = np.zeros(Ne, dtype=float)
+    bh_id = np.full(Ne, -1, dtype=np.int16)
+    bh_curves: list[dict] = []
+
+    def _register_bh_curve(material: str, params: dict, label: str | None):
+        raw_curve = params.get("bh_curve") if isinstance(params, dict) else None
+        b_sat = params.get("b_sat") if isinstance(params, dict) else None
+        mu_linear = None
+        if isinstance(params, dict) and "mu_r" in params:
+            try:
+                mu_linear = float(params["mu_r"])
+            except (TypeError, ValueError):
+                mu_linear = None
+        source = params.get("bh_source") if isinstance(params, dict) else None
+        # If an explicit curve is provided (e.g., CSV upload), ignore b_sat-based inference.
+        if raw_curve is not None:
+            b_sat = None
+        curve = _normalize_bh_curve(raw_curve, mu_r_linear=mu_linear, b_sat=b_sat,
+                                    material=material, label=label, source=source)
+        if curve is None:
+            return None
+        curve_id = len(bh_curves)
+        curve["id"] = curve_id
+        bh_curves.append(curve)
+        return curve_id
 
     def _fast_contains_polygon(points: np.ndarray, verts: list[list[float]], holes: list[list[list[float]]] | None):
         """Fast point-in-polygon with chunking; returns boolean mask."""
@@ -1914,6 +1939,10 @@ def build_fields_from_definition(nodes, tris, LxLy, definition, *,
                     return mat_defaults[key]
                 return fallback
 
+            curve_id = None
+            if material in {"steel", "magnet"}:
+                curve_id = _register_bh_curve(material, params, obj.get("label"))
+
             if material in {"air", "magnet", "steel"}:
                 target_mu = float(_param("mu_r", 1.0 if material == "air" else 1.05 if material == "magnet" else 1000.0))
                 mu_r[mask] = target_mu
@@ -1926,6 +1955,8 @@ def build_fields_from_definition(nodes, tris, LxLy, definition, *,
                     My[mask] = my_rot
                 region_id = {"air": AIR, "magnet": PMAG, "steel": STEEL}[material]
                 region[mask] = region_id
+                if curve_id is not None:
+                    bh_id[mask] = curve_id
             if material == "wire":
                 total_current = float(_param("current", 0.0))
                 A = tri_area_vals[mask].sum()
@@ -1945,11 +1976,14 @@ def build_fields_from_definition(nodes, tris, LxLy, definition, *,
             meta["grid"] = _safe_meta_copy(grid_spec)
         if mesh_meta is not None:
             meta["mesh_generation"] = _safe_meta_copy(mesh_meta)
+        if bh_curves:
+            meta["bh_curves"] = bh_curves
         return dict(
             nodes=nodes,
             tris=tris,
             region_id=region,
             mu_r=mu_r,
+            bh_id=bh_id,
             Mx=Mx,
             My=My,
             Jz=Jz,
@@ -1989,11 +2023,20 @@ def build_fields_from_definition(nodes, tris, LxLy, definition, *,
                 return mat_defaults[key]
             return fallback
 
+        curve_id = None
+        if material in {"steel", "magnet"}:
+            curve_id = _register_bh_curve(material, params, obj.get("label"))
+
         if material in {"air", "magnet", "steel"}:
             target_mu = float(_param("mu_r", 1.0 if material == "air" else 1.05 if material == "magnet" else 1000.0))
             mu_r = np.where(has_overlap, (1.0 - fraction) * mu_r + fraction * target_mu, mu_r)
             region_id = {"air": AIR, "magnet": PMAG, "steel": STEEL}[material]
             region = np.where(fraction >= min_fill, region_id, region)
+            if curve_id is not None:
+                # Even if the steel patch does not pass the region min_fill test,
+                # keep its bh_id so the nonlinear solve can still saturate the
+                # blended high-µ triangles instead of leaving them linear.
+                bh_id = np.where(has_overlap, curve_id, bh_id)
             if material == "magnet":
                 target_mx_local = float(_param("Mx", 0.0))
                 target_my_local = float(_param("My", 8e5))
@@ -2023,6 +2066,8 @@ def build_fields_from_definition(nodes, tris, LxLy, definition, *,
     ]
     if contours:
         meta["contours"] = contours
+    if bh_curves:
+        meta["bh_curves"] = bh_curves
     if definition_source:
         meta["case_definition_source"] = str(definition_source)
     if grid_spec is not None:
@@ -2035,6 +2080,7 @@ def build_fields_from_definition(nodes, tris, LxLy, definition, *,
         tris=tris,
         region_id=region,
         mu_r=mu_r,
+        bh_id=bh_id,
         Mx=Mx,
         My=My,
         Jz=Jz,
@@ -2255,6 +2301,82 @@ def _shape_overlap_fraction(shape, nodes, tris, tri_area_vals):
             float(inner),
         )
     return None
+
+
+def _infer_bh_curve(mu_r: float, b_sat: float) -> list[list[float]]:
+    """Simple two-slope BH guess: linear to B_sat, then air slope."""
+    mu_r = max(float(mu_r), 1.0)
+    b_sat = max(float(b_sat), 1e-6)
+    h_sat = b_sat / (MU0 * mu_r)
+    b_tail = b_sat + 0.5  # add a modest tail so extrapolation has a slope
+    h_tail = h_sat + (b_tail - b_sat) / MU0
+    return [[0.0, 0.0], [b_sat, h_sat], [b_tail, h_tail]]
+
+
+def _normalize_bh_curve(raw_curve, *, mu_r_linear: float | None, b_sat: float | None,
+                        material: str | None, label: str | None, source: str | None):
+    """
+    Accept a curve as list of [B,H], dict with B/H arrays, or None+sat inference.
+    Returns a dict with sorted, deduped B/H arrays or None if invalid.
+    """
+    points: list[list[float]] = []
+    src = source
+    if isinstance(raw_curve, dict):
+        if "points" in raw_curve:
+            raw_curve = raw_curve.get("points")
+        elif "B" in raw_curve and "H" in raw_curve:
+            raw_B = raw_curve.get("B")
+            raw_H = raw_curve.get("H")
+            try:
+                points = [[float(b), float(h)] for b, h in zip(raw_B, raw_H)]
+            except Exception:
+                points = []
+        if src is None and isinstance(raw_curve, dict):
+            src = raw_curve.get("source")
+    if isinstance(raw_curve, (list, tuple)) and not points:
+        for entry in raw_curve:
+            if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                try:
+                    points.append([float(entry[0]), float(entry[1])])
+                except Exception:
+                    continue
+            elif isinstance(entry, dict) and {"B", "H"} <= set(entry.keys()):
+                try:
+                    points.append([float(entry.get("B", 0.0)), float(entry.get("H", 0.0))])
+                except Exception:
+                    continue
+    if not points and b_sat and mu_r_linear:
+        points = _infer_bh_curve(mu_r_linear, b_sat)
+        src = src or "inferred"
+    if len(points) < 2:
+        return None
+    arr = np.asarray(points, dtype=float)
+    if arr.ndim != 2 or arr.shape[1] < 2:
+        return None
+    B = np.abs(arr[:, 0])
+    H = np.abs(arr[:, 1])
+    finite = np.isfinite(B) & np.isfinite(H)
+    B = B[finite]
+    H = H[finite]
+    if B.size < 2:
+        return None
+    order = np.argsort(B)
+    B = B[order]
+    H = H[order]
+    keep = np.concatenate([[True], np.diff(B) > 1e-12])
+    B = B[keep]
+    H = H[keep]
+    if B.size < 2:
+        return None
+    return {
+        "B": B.tolist(),
+        "H": H.tolist(),
+        "mu_r_linear": float(mu_r_linear) if mu_r_linear is not None else None,
+        "b_sat": float(b_sat) if b_sat is not None else None,
+        "material": material,
+        "label": label,
+        "source": src or "csv",
+    }
 
 
 def _shape_angle_degrees(shape) -> float:

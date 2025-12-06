@@ -116,6 +116,9 @@ When you *do* pass `--adapt-from` while in `point_cloud` mode, the solver evalua
 | positional / `--case <path>` | Case folder or .npz path to solve (defaults as noted above). |
 | `--cases-dir <path>` | Base directory for case folders (default: `cases`). |
 | `--pin-node <idx>` | Node index pinned to zero to fix the Neumann gauge (default: 0). |
+| `--bh-max-iters`, `--bh-residual-tol`, `--bh-min-drop` | Control BH Newton iteration cap, residual tolerance, and early-stop threshold. |
+| `--bh-allow-labels` | Comma-separated substrings to keep BH curves only on matching shape labels (others remain linear). |
+| `--freeze-mu-from <B_field.npz>` | Reuse `mu_r_effective` from a prior solve (skips BH iteration and solves linearly). |
 
 ---
 
@@ -198,6 +201,12 @@ Permanent magnet `params.Mx/My` are specified in the shape's local (unrotated) a
 ### Adaptive mesh controls
 
 The **Adaptive mesh** mode in the Case Builder now drives the new point-cloud mesher. You still choose coarse / fine pitches, a padding distance, and which materials count as “focus,” but refinement stays local:
+
+### B–H curves and saturation
+
+Steel objects can now carry a nonlinear B–H curve. In the Case Builder, either enter `µ_r` plus a saturation `B_sat` to auto-generate a simple knee, or upload a CSV with two columns (comma/space separated) `B_T, H_A_per_m` (header optional, comments starting with `#` are ignored). The mesh stores per-triangle `bh_id` plus the curve in metadata; the solver runs a Picard loop to update `µ_r` from the curve and writes the effective `mu_r_effective` alongside the usual outputs.
+
+Each solve appends a lightweight diagnostics line to `cases/<case>/diagnostics.log` (NDJSON): timestamp, mesh path, node/tri counts, BH settings (method, iterations, convergence, flags), µ ranges, and timing. Use it to trace why a run was slow or which solver path was taken. The file grows over time; delete it if you want a fresh log.
 
 1. A coarse lattice covers the entire domain using the requested `coarse` spacing (optionally anisotropic via `mesh.y`).
 2. Each focus region (material bounds ± `focus_pad` or manually supplied `focus_boxes`) receives its own fine lattice sampled at `fine` spacing.

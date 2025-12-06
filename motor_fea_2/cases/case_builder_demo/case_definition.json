@@ -6,32 +6,19 @@
     "Lx": 0.6,
     "Ly": 0.6,
     "mesh": {
-      "type": "point_cloud",
-      "fine": 0.0002,
+      "type": "experimental",
+      "fine": 0.0004,
       "coarse": 0.001,
       "focus_pad": 0.004,
       "focus_falloff": 0.003,
       "focus_materials": [
         "steel"
-      ],
-      "quality_min_angle": 28,
-      "field_focus": {
-        "enabled": true,
-        "direction_weight": 0,
-        "magnitude_weight": 1,
-        "indicator_gain": 100,
-        "indicator_neutral": null,
-        "scale_min": 0.2,
-        "scale_max": 5,
-        "smooth_passes": 1,
-        "size_smooth_passes": 2,
-        "ratio_limit": 1.7,
-        "indicator_clip": [
-          5,
-          95
-        ]
-      }
+      ]
     }
+  },
+  "solve": {
+    "indicator": false,
+    "skip_mesh_if_clean": true
   },
   "defaults": {
     "magnet": {

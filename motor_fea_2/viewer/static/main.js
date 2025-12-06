@@ -26,12 +26,15 @@ const state = {
   bField: null,
   indicator: null,
   contours: { segments: [], totals: [] },
+  quickContours: null,
+  quickContoursCase: null,
   centroids: [],
   neighbors: [],
   indicatorStats: null,
   designShapes: [],
   indicatorPreview: null,
   viewport: { width: 0, height: 0 },
+  materialTriangles: null,
   view: {
     centerX: 0,
     centerY: 0,
@@ -82,8 +85,13 @@ const TARGET_WIRE_COLOR = "#a62019";
 const TARGET_CONTOUR_COLOR = "#111827";
 const CONTOUR_B_COLOR = "#0f766e";
 const CONTOUR_FORCE_COLOR = "#b45309";
-const B_MAG_MIN_COLOR = { r: 230, g: 244, b: 255 };
-const B_MAG_MAX_COLOR = { r: 178, g: 24, b: 43 };
+const B_MAG_MIN_COLOR = { r: 255, g: 255, b: 255 }; // 0 T = white
+const B_MAG_LOW_COLOR = { r: 255, g: 243, b: 205 }; // faint warm tint around 0.2–0.5 T
+const B_MAG_MIDWARM_COLOR = { r: 252, g: 174, b: 74 }; // orange around 1 T
+const B_MAG_MID_COLOR = { r: 220, g: 38, b: 38 }; // ~2 T turns red
+const B_MAG_HIGH_COLOR = { r: 120, g: 0, b: 0 }; // deep maroon for a steep ramp to black
+const B_MAG_MAX_COLOR = { r: 0, g: 0, b: 0 }; // highest fields fade to black
+const B_MAG_RED_POINT_TESLA = 2;
 const JFREE_NEG_COLOR = { r: 33, g: 94, b: 189 };
 const JFREE_POS_COLOR = { r: 215, g: 38, b: 61 };
 const JFREE_ZERO_COLOR = { r: 255, g: 255, b: 255 };
@@ -237,6 +245,9 @@ async function loadMesh(caseName, options = {}) {
   if (!caseName) {
     return null;
   }
+  state.quickContours = null;
+  state.quickContoursCase = caseName;
+  fetchQuickContours(caseName).catch(() => {});
   const { preserveView = false, preserveSelection = false } = options;
   const previousSelection =
     preserveSelection && state.selectedCellIndex !== null
@@ -265,6 +276,12 @@ async function loadMesh(caseName, options = {}) {
       }
     }
     state.caseName = caseName;
+    state.materialTriangles = buildMaterialTriangles(
+      mesh.region_id,
+      mesh.tris ? mesh.tris.length : 0,
+      mesh.fields?.Jz
+    );
+    // Always build full edge list so mesh lines cover the whole domain.
     state.edges = buildEdges(mesh.tris || []);
     state.neighbors = buildNeighbors(mesh.tris || []);
     state.centroids = computeCentroids(mesh.nodes || [], mesh.tris || []);
@@ -310,10 +327,62 @@ async function loadMesh(caseName, options = {}) {
   }
 }
 
-function buildEdges(tris) {
+function buildMaterialTriangles(regionIds, triCount, jzField = null) {
+  const hasRegions = Array.isArray(regionIds) && regionIds.length;
+  const hasJz = Array.isArray(jzField) && jzField.length;
+  if (!hasRegions && !hasJz) {
+    return null;
+  }
+  const limit = Math.min(triCount || 0, hasRegions ? regionIds.length : jzField.length);
+  if (!(limit > 0)) {
+    return null;
+  }
+  const indices = [];
+  for (let i = 0; i < limit; i += 1) {
+    const region = hasRegions ? Number(regionIds[i]) : 0;
+    const jz = hasJz ? Number(jzField[i]) : 0;
+    if ((Number.isFinite(region) && region !== 0) || (Number.isFinite(jz) && Math.abs(jz) > 0)) {
+      indices.push(i);
+    }
+  }
+  return indices.length && indices.length < limit ? indices : null;
+}
+
+function buildEdges(tris, includeIndices = null) {
   const seen = new Set();
   const edges = [];
-  for (const tri of tris) {
+  const indexList =
+    Array.isArray(includeIndices) && includeIndices.length
+      ? includeIndices
+      : null;
+  if (!Array.isArray(tris)) {
+    return edges;
+  }
+  if (indexList) {
+    for (const idx of indexList) {
+      const tri = tris[idx];
+      if (!Array.isArray(tri) || tri.length !== 3) continue;
+      const pairs = [
+        [tri[0], tri[1]],
+        [tri[1], tri[2]],
+        [tri[2], tri[0]],
+      ];
+      for (const [a, b] of pairs) {
+        const i = Number(a);
+        const j = Number(b);
+        if (!Number.isFinite(i) || !Number.isFinite(j)) continue;
+        const key = i < j ? `${i}-${j}` : `${j}-${i}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          edges.push([i, j]);
+        }
+      }
+    }
+    return edges;
+  }
+
+  for (let idx = 0; idx < tris.length; idx += 1) {
+    const tri = tris[idx];
     if (!Array.isArray(tri) || tri.length !== 3) continue;
     const pairs = [
       [tri[0], tri[1]],
@@ -368,6 +437,25 @@ function buildNeighbors(tris) {
     });
   });
   return neighbors;
+}
+
+async function fetchQuickContours(caseName) {
+  try {
+    const response = await fetch(`/api/mesh/summary?case=${encodeURIComponent(caseName)}`);
+    if (!response.ok) {
+      return null;
+    }
+    const data = await response.json();
+    if (state.quickContoursCase !== caseName) {
+      return data;
+    }
+    state.quickContours = data;
+    updateSummary(null);
+    emitViewerEvent("quickContours", { caseName, contours: data });
+    return data;
+  } catch (error) {
+    return null;
+  }
 }
 
 function computeCentroids(nodes, tris) {
@@ -694,6 +782,30 @@ function render() {
 
 function updateSummary(mesh) {
   if (!mesh) {
+    const quickContours = state.quickContours?.totals || [];
+    if (quickContours.length) {
+      const contourSummary = quickContours
+        .map((entry) => {
+          const label = entry.contour_label || `Contour ${entry.contour_index}`;
+          const fx = entry.net_force?.[0] ?? 0;
+          const fy = entry.net_force?.[1] ?? 0;
+          const torque = entry.net_torque ?? 0;
+          return `${label}: Fx=${formatNumber(fx, 4)} N/m, Fy=${formatNumber(
+            fy,
+            4
+          )} N/m, τ=${formatNumber(torque, 4)} N·m/m`;
+        })
+        .join("<br/>");
+      summaryContent.innerHTML = `
+        <dl>
+          <dt>Contours (quick)</dt>
+          <dd>${contourSummary}</dd>
+          <dt>Status</dt>
+          <dd>Loading full mesh…</dd>
+        </dl>
+      `;
+      return;
+    }
     summaryContent.textContent = "No mesh loaded.";
     return;
   }
@@ -727,7 +839,13 @@ function updateSummary(mesh) {
       )}@p${formatNumber(previewStats.ref_percentile, 1)})`
     : "";
   const indicatorBlock = [indicatorLines, alphaLines].filter(Boolean).join("<br/>");
-  const contourTotals = state.contours?.totals || [];
+  const contourTotals =
+    (state.contours?.totals && state.contours.totals.length
+      ? state.contours.totals
+      : null) ||
+    (state.quickContours?.totals && state.quickContours.totals.length
+      ? state.quickContours.totals
+      : []);
   const contourSummary = contourTotals.length
     ? contourTotals
         .map((entry) => {
@@ -1256,15 +1374,20 @@ function drawMaterials() {
   const regionIds = state.mesh.region_id || [];
   const jzField = state.mesh.fields?.Jz || null;
   const jzThreshold = jzCopperThreshold(jzField);
+  const materialTris =
+    Array.isArray(state.materialTriangles) && state.materialTriangles.length
+      ? state.materialTriangles
+      : null;
 
   ctx.save();
-  for (let i = 0; i < tris.length; i += 1) {
+  const drawTri = (i) => {
     const tri = tris[i];
     const pa = nodes[tri[0]];
     const pb = nodes[tri[1]];
     const pc = nodes[tri[2]];
-    if (!pa || !pb || !pc) continue;
-    const fillStyle = materialColor(regionIds[i], jzField ? jzField[i] : 0, jzThreshold);
+    if (!pa || !pb || !pc) return;
+    const regionId = Array.isArray(regionIds) ? regionIds[i] : null;
+    const fillStyle = materialColor(regionId, jzField ? jzField[i] : 0, jzThreshold);
     ctx.beginPath();
     const A = worldToScreen(pa[0], pa[1]);
     const B = worldToScreen(pb[0], pb[1]);
@@ -1275,6 +1398,16 @@ function drawMaterials() {
     ctx.closePath();
     ctx.fillStyle = fillStyle;
     ctx.fill();
+  };
+
+  if (materialTris) {
+    for (const idx of materialTris) {
+      drawTri(idx);
+    }
+  } else {
+    for (let i = 0; i < tris.length; i += 1) {
+      drawTri(i);
+    }
   }
   ctx.restore();
 }
@@ -1765,23 +1898,67 @@ function bMagnitudeColor(value, minVal, range, mode, logExtent) {
 }
 
 function bMagnitudeColorLinear(value, minVal, range) {
-  const t = clamp((value - minVal) / range, 0, 1);
-  return lerpColor(B_MAG_MIN_COLOR, B_MAG_MAX_COLOR, t);
+  const safeRange = Math.max(range, 1e-12);
+  const maxVal = minVal + safeRange;
+  const t = normalizeToUnit(value, minVal, maxVal);
+  const redPoint = clamp(normalizeToUnit(B_MAG_RED_POINT_TESLA, minVal, maxVal), 0.05, 0.95);
+  return bMagnitudeGradient(t, redPoint);
 }
 
 function bMagnitudeColorLog(value, logExtent) {
   if (!logExtent) {
-    return lerpColor(B_MAG_MIN_COLOR, B_MAG_MAX_COLOR, 0);
+    return bMagnitudeGradient(0, 1);
   }
-  if (!(value > 0)) {
-    return lerpColor(B_MAG_MIN_COLOR, B_MAG_MAX_COLOR, 0);
-  }
-  const t = clamp(
-    (safeLog10(value) - logExtent.minLog) / logExtent.range,
-    0,
-    1
+  const safeRange = Math.max(logExtent.range, 1e-12);
+  const minLog = logExtent.minLog;
+  const logVal = value > 0 ? safeLog10(value) : -Infinity;
+  const t = Number.isFinite(logVal)
+    ? clamp((logVal - minLog) / safeRange, 0, 1)
+    : 0;
+  const redLog = safeLog10(B_MAG_RED_POINT_TESLA);
+  const redPoint = clamp(
+    Number.isFinite(redLog) ? (redLog - minLog) / safeRange : 0,
+    0.05,
+    0.95
   );
-  return lerpColor(B_MAG_MIN_COLOR, B_MAG_MAX_COLOR, t);
+  return bMagnitudeGradient(t, redPoint);
+}
+
+function bMagnitudeGradient(t, redPoint) {
+  const clampedRed = clamp(redPoint, 0, 1);
+  const clampedValue = clamp(t, 0, 1);
+  const eased = Math.pow(clampedValue, 0.7); // spread lower values apart so 0.5T isn't lost next to 2T
+  const lowStop = clampedRed * 0.35;
+  const warmStop = clampedRed * 0.7;
+  const redStop = clampedRed;
+  const highStop = redStop + (1 - redStop) * 0.55;
+
+  if (eased <= lowStop) {
+    const localT = lowStop > 0 ? eased / lowStop : 0;
+    return lerpColor(B_MAG_MIN_COLOR, B_MAG_LOW_COLOR, localT);
+  }
+  if (eased <= warmStop) {
+    const localT = (eased - lowStop) / Math.max(warmStop - lowStop, 1e-9);
+    return lerpColor(B_MAG_LOW_COLOR, B_MAG_MIDWARM_COLOR, localT);
+  }
+  if (eased <= redStop) {
+    const localT = (eased - warmStop) / Math.max(redStop - warmStop, 1e-9);
+    return lerpColor(B_MAG_MIDWARM_COLOR, B_MAG_MID_COLOR, localT);
+  }
+  if (eased <= highStop) {
+    const localT = (eased - redStop) / Math.max(highStop - redStop, 1e-9);
+    return lerpColor(B_MAG_MID_COLOR, B_MAG_HIGH_COLOR, localT);
+  }
+  const localT = (eased - highStop) / Math.max(1 - highStop, 1e-9);
+  return lerpColor(B_MAG_HIGH_COLOR, B_MAG_MAX_COLOR, localT);
+}
+
+function normalizeToUnit(value, minVal, maxVal) {
+  const range = maxVal - minVal;
+  if (!(range > 0)) {
+    return 0;
+  }
+  return clamp((value - minVal) / range, 0, 1);
 }
 
 function drawJfreeHeatmap() {

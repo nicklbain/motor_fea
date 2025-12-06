@@ -4,7 +4,10 @@ import argparse
 import json
 import math
 from pathlib import Path
+import time
 import subprocess
+import threading
+import uuid
 from typing import Any, Dict, List, Tuple
 
 from flask import Flask, abort, jsonify, render_template, request
@@ -46,6 +49,11 @@ DEFAULT_GRID = {
         },
     },
 }
+DEFAULT_SOLVE = {
+    "indicator": True,
+    "skip_mesh_if_clean": True,
+    "use_bh_curves": True,
+}
 
 APP_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = APP_ROOT.parent
@@ -55,6 +63,8 @@ PIPELINE_STEPS = (
     ("solve_B", ["python3", "solve_B.py", "--case"]),
 )
 DXF_MAX_VERTICES = 20000
+_JOB_LOCK = threading.Lock()
+_JOBS: Dict[str, Dict[str, Any]] = {}
 
 
 def _approx_circle_vertices(center: Tuple[float, float], radius: float, segments: int = 128) -> List[Tuple[float, float]]:
@@ -114,7 +124,19 @@ def _load_definition(path: Path) -> Dict[str, Any]:
     if not path.exists():
         return _default_definition(path.parent.name)
     with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
+        data = json.load(handle)
+    if not isinstance(data, dict):
+        return _default_definition(path.parent.name)
+    if "solve" not in data or not isinstance(data["solve"], dict):
+        data["solve"] = json.loads(json.dumps(DEFAULT_SOLVE))
+    else:
+        solve = data["solve"]
+        data["solve"] = {
+            "indicator": bool(solve.get("indicator", True)),
+            "skip_mesh_if_clean": bool(solve.get("skip_mesh_if_clean", True)),
+            "use_bh_curves": bool(solve.get("use_bh_curves", True)),
+        }
+    return data
 
 
 def _default_definition(case_name: str) -> Dict[str, Any]:
@@ -122,6 +144,7 @@ def _default_definition(case_name: str) -> Dict[str, Any]:
         "name": case_name,
         "grid": json.loads(json.dumps(DEFAULT_GRID)),
         "objects": [],
+        "solve": json.loads(json.dumps(DEFAULT_SOLVE)),
         "defaults": {
             "magnet": {"mu_r": 1.05, "My": 8e5},
             "steel": {"mu_r": 1000.0},
@@ -138,18 +161,30 @@ def _write_definition(path: Path, definition: Dict[str, Any]) -> None:
         handle.write("\n")
 
 
-def _run_pipeline(case_name: str, *, mesh_extra_args: List[str] | None = None) -> List[Dict[str, Any]]:
+def _run_pipeline(
+    case_name: str,
+    *,
+    mesh_extra_args: List[str] | None = None,
+    skip_mesh: bool = False,
+    solve_extra_args: List[str] | None = None,
+) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
     for step, base_command in PIPELINE_STEPS:
+        if step == "mesh" and skip_mesh:
+            continue
         command = [*base_command, case_name]
         if step == "mesh" and mesh_extra_args:
             command.extend(mesh_extra_args)
+        if step == "solve_B" and solve_extra_args:
+            command.extend(solve_extra_args)
+        started = time.perf_counter()
         completed = subprocess.run(
             command,
             cwd=REPO_ROOT,
             capture_output=True,
             text=True,
         )
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
         step_result: Dict[str, Any] = {
             "step": step,
             "command": command,
@@ -157,11 +192,101 @@ def _run_pipeline(case_name: str, *, mesh_extra_args: List[str] | None = None) -
             "stdout": completed.stdout,
             "stderr": completed.stderr,
             "success": completed.returncode == 0,
+            "duration_ms": elapsed_ms,
         }
         results.append(step_result)
         if completed.returncode != 0:
             break
     return results
+
+
+def _normalize_and_prepare_payload(case_name: str, payload: Dict[str, Any]) -> tuple[str, Path, Dict[str, Any]]:
+    """Normalize case name, sanitize solve section, and return path + payload copy."""
+    normalized = _normalize_case_name(case_name)
+    path = _case_definition_path(normalized)
+    solve = payload.get("solve") if isinstance(payload, dict) else None
+    clean = json.loads(json.dumps(payload if isinstance(payload, dict) else {}))
+    if not isinstance(solve, dict):
+        clean["solve"] = json.loads(json.dumps(DEFAULT_SOLVE))
+    else:
+        clean["solve"] = {
+            "indicator": bool(solve.get("indicator", True)),
+            "skip_mesh_if_clean": bool(solve.get("skip_mesh_if_clean", True)),
+            "use_bh_curves": bool(solve.get("use_bh_curves", True)),
+        }
+    return normalized, path, clean
+
+
+def _run_case_sync(case_name: str, payload: Dict[str, Any]) -> tuple[Dict[str, Any], bool, str | None]:
+    """Run mesh+solve synchronously and return (response, success, error_message)."""
+    try:
+        normalized, path, clean_payload = _normalize_and_prepare_payload(case_name, payload)
+    except ValueError as exc:
+        return {}, False, str(exc)
+
+    existing_def = _load_definition(path) if path.exists() else None
+    definition_changed = existing_def is None or clean_payload != existing_def
+    solve_spec = clean_payload.get("solve") if isinstance(clean_payload, dict) else {}
+    compute_indicator = bool(solve_spec.get("indicator", True)) if isinstance(solve_spec, dict) else True
+    skip_mesh_if_clean = bool(solve_spec.get("skip_mesh_if_clean", True)) if isinstance(solve_spec, dict) else True
+    use_bh_curves = bool(solve_spec.get("use_bh_curves", True)) if isinstance(solve_spec, dict) else True
+    solve_args = []
+    if not compute_indicator:
+        solve_args.append("--no-indicator")
+    if not use_bh_curves:
+        solve_args.append("--no-bh")
+    mesh_path = (_case_dir(normalized) / "mesh.npz").resolve()
+    skip_mesh = skip_mesh_if_clean and (not definition_changed) and mesh_path.exists()
+    if definition_changed or not path.exists():
+        _write_definition(path, clean_payload)
+    steps = _run_pipeline(
+        normalized,
+        skip_mesh=skip_mesh,
+        solve_extra_args=solve_args,
+    )
+    success = bool(steps) and all(step["success"] for step in steps)
+    response: Dict[str, Any] = {
+        "case": normalized,
+        "path": str(path),
+        "steps": steps,
+        "succeeded": success,
+        "skipped_mesh": skip_mesh,
+    }
+    if not success:
+        failed_step = next((step for step in reversed(steps) if not step["success"]), None)
+        if failed_step:
+            response["error"] = f"{failed_step['step']} failed with exit code {failed_step['returncode']}"
+        else:
+            response["error"] = "Run pipeline did not complete successfully."
+    return response, success, response.get("error")
+
+
+def _set_job(job_id: str, **fields: Any) -> Dict[str, Any]:
+    with _JOB_LOCK:
+        job = _JOBS.get(job_id, {"job_id": job_id})
+        job.update(fields)
+        _JOBS[job_id] = job
+        return job
+
+
+def _get_job(job_id: str) -> Dict[str, Any] | None:
+    with _JOB_LOCK:
+        job = _JOBS.get(job_id)
+        return dict(job) if job else None
+
+
+def _run_job_thread(job_id: str, case_name: str, payload: Dict[str, Any]) -> None:
+    _set_job(job_id, status="running", started_at=time.time())
+    response, success, error = _run_case_sync(case_name, payload)
+    finished = time.time()
+    status = "completed" if success else "failed"
+    _set_job(
+        job_id,
+        status=status,
+        finished_at=finished,
+        result=response,
+        error=error,
+    )
 
 
 def _shape_bounds(shape: Dict[str, Any]) -> Tuple[float, float, float, float] | None:
@@ -563,6 +688,7 @@ def index():
         "cases": cases,
         "defaultCase": cases[0] if cases else "",
         "defaultGrid": DEFAULT_GRID,
+        "defaultSolve": DEFAULT_SOLVE,
     }
     return render_template("index.html", bootstrap=bootstrap)
 
@@ -610,37 +736,52 @@ def api_save_definition(case_name: str):
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         abort(400, description="Expected JSON object for case definition")
+    solve = payload.get("solve") if isinstance(payload, dict) else None
+    if not isinstance(solve, dict):
+        payload["solve"] = json.loads(json.dumps(DEFAULT_SOLVE))
+    else:
+        payload["solve"] = {
+            "indicator": bool(solve.get("indicator", True)),
+            "skip_mesh_if_clean": bool(solve.get("skip_mesh_if_clean", True)),
+            "use_bh_curves": bool(solve.get("use_bh_curves", True)),
+        }
     _write_definition(path, payload)
     return jsonify({"saved": True, "case": _normalize_case_name(case_name), "path": str(path)})
 
 
 @app.post("/api/case/<path:case_name>/run")
 def api_run_case(case_name: str):
-    try:
-        normalized = _normalize_case_name(case_name)
-        path = _case_definition_path(normalized)
-    except ValueError as exc:
-        abort(400, description=str(exc))
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         abort(400, description="Expected JSON object for case definition")
-    _write_definition(path, payload)
-    steps = _run_pipeline(normalized)
-    success = len(steps) == len(PIPELINE_STEPS) and all(step["success"] for step in steps)
-    response: Dict[str, Any] = {
-        "case": normalized,
-        "path": str(path),
-        "steps": steps,
-        "succeeded": success,
-    }
+    response, success, error = _run_case_sync(case_name, payload)
     if success:
         return jsonify(response)
-    failed_step = next((step for step in reversed(steps) if not step["success"]), None)
-    if failed_step:
-        response["error"] = f"{failed_step['step']} failed with exit code {failed_step['returncode']}"
-    else:
-        response["error"] = "Run pipeline did not complete successfully."
-    return jsonify(response), 500
+    return jsonify(response | {"error": error or response.get("error")}), 500
+
+
+@app.post("/api/case/<path:case_name>/run-async")
+def api_run_case_async(case_name: str):
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        abort(400, description="Expected JSON object for case definition")
+    try:
+        normalized, _, clean_payload = _normalize_and_prepare_payload(case_name, payload)
+    except ValueError as exc:
+        abort(400, description=str(exc))
+    job_id = uuid.uuid4().hex
+    _set_job(job_id, status="queued", case=normalized, created_at=time.time())
+    thread = threading.Thread(target=_run_job_thread, args=(job_id, normalized, clean_payload), daemon=True)
+    thread.start()
+    return jsonify({"job_id": job_id, "case": normalized, "status": "queued"})
+
+
+@app.get("/api/job/<job_id>/status")
+def api_job_status(job_id: str):
+    job = _get_job(job_id)
+    if not job:
+        abort(404, description="Unknown job id")
+    return jsonify(job)
 
 
 @app.post("/api/case/<path:case_name>/run-adaptive")
@@ -658,11 +799,23 @@ def api_run_case_adaptive(case_name: str):
     saved_definition = _load_definition(path)
     if payload != saved_definition:
         abort(409, description="Definition has changed since the last solve. Run the standard case first.")
+    solve_spec = payload.get("solve") if isinstance(payload, dict) else {}
+    compute_indicator = bool(solve_spec.get("indicator", True)) if isinstance(solve_spec, dict) else True
+    use_bh_curves = bool(solve_spec.get("use_bh_curves", True)) if isinstance(solve_spec, dict) else True
+    solve_args: list[str] = []
+    if not compute_indicator:
+        solve_args.append("--no-indicator")
+    if not use_bh_curves:
+        solve_args.append("--no-bh")
     b_field_path = (_case_dir(normalized) / "B_field.npz").resolve()
     if not b_field_path.exists():
         abort(400, description="No B_field.npz found. Run the standard case once before adaptive refinement.")
-    steps = _run_pipeline(normalized, mesh_extra_args=["--adapt-from", str(b_field_path)])
-    success = len(steps) == len(PIPELINE_STEPS) and all(step["success"] for step in steps)
+    steps = _run_pipeline(
+        normalized,
+        mesh_extra_args=["--adapt-from", str(b_field_path)],
+        solve_extra_args=solve_args,
+    )
+    success = bool(steps) and all(step["success"] for step in steps)
     response: Dict[str, Any] = {
         "case": normalized,
         "path": str(path),
@@ -700,7 +853,9 @@ def api_mesh_adaptive(case_name: str):
     if not b_field_path.exists():
         abort(400, description="No B_field.npz found. Run the standard case once before adaptive refinement.")
     mesh_command = ["python3", "mesh_and_sources.py", "--case", normalized, "--adapt-from", str(b_field_path), "--mesh-only"]
+    started = time.perf_counter()
     completed = subprocess.run(mesh_command, cwd=REPO_ROOT, capture_output=True, text=True)
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
     step_result: Dict[str, Any] = {
         "step": "mesh",
         "command": mesh_command,
@@ -708,6 +863,7 @@ def api_mesh_adaptive(case_name: str):
         "stdout": completed.stdout,
         "stderr": completed.stderr,
         "success": completed.returncode == 0,
+        "duration_ms": elapsed_ms,
     }
     response: Dict[str, Any] = {
         "case": normalized,
@@ -739,7 +895,9 @@ def api_mesh_only(case_name: str):
     if payload != saved_definition:
         abort(409, description="Definition has changed since the last save. Run the standard case first.")
     mesh_command = ["python3", "mesh_and_sources.py", "--case", normalized, "--mesh-only"]
+    started = time.perf_counter()
     completed = subprocess.run(mesh_command, cwd=REPO_ROOT, capture_output=True, text=True)
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
     step_result: Dict[str, Any] = {
         "step": "mesh",
         "command": mesh_command,
@@ -747,6 +905,7 @@ def api_mesh_only(case_name: str):
         "stdout": completed.stdout,
         "stderr": completed.stderr,
         "success": completed.returncode == 0,
+        "duration_ms": elapsed_ms,
     }
     response: Dict[str, Any] = {
         "case": normalized,

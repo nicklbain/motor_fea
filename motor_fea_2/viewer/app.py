@@ -17,6 +17,7 @@ CASES_DIR = (REPO_ROOT / "cases").resolve()
 DEFAULT_CASE_SUBDIR = "mag2d_case"
 DEFAULT_MESH_NAME = "mesh.npz"
 LEGACY_DEFAULT_FILENAME = "mag2d_case.npz"
+INDICATOR_FALLBACK_LIMIT = 200_000
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
 
@@ -340,15 +341,29 @@ def _load_mesh_payload(path: Path) -> Dict[str, Any]:
                 for key in ("indicator_magnitude", "indicator_direction", "indicator_combined", "alpha")
                 if key in b_field[2]
             }
-            indicator_info = _indicator_payload(
-                nodes,
-                tris,
-                b_field[2]["Bmag"],
-                b_field[2]["Bx"],
-                b_field[2]["By"],
-                indicator_arrays=indicator_arrays or None,
-                indicator_meta=(b_field[0].get("meta") or {}).get("field_indicator") if b_field[0].get("meta") else None,
-            )
+            indicator_meta = (b_field[0].get("meta") or {}).get("field_indicator") if b_field[0].get("meta") else None
+            indicator_info = None
+            # Avoid recomputing indicators for very large meshes unless precomputed arrays are available.
+            if indicator_arrays:
+                indicator_info = _indicator_payload(
+                    nodes,
+                    tris,
+                    b_field[2]["Bmag"],
+                    b_field[2]["Bx"],
+                    b_field[2]["By"],
+                    indicator_arrays=indicator_arrays,
+                    indicator_meta=indicator_meta,
+                )
+            elif tris.shape[0] <= INDICATOR_FALLBACK_LIMIT and indicator_meta:
+                indicator_info = _indicator_payload(
+                    nodes,
+                    tris,
+                    b_field[2]["Bmag"],
+                    b_field[2]["Bx"],
+                    b_field[2]["By"],
+                    indicator_arrays=None,
+                    indicator_meta=indicator_meta,
+                )
             if indicator_info:
                 payload["indicator"] = indicator_info
                 payload["summary"]["indicator_stats"] = indicator_info.get("stats")
@@ -389,6 +404,51 @@ def api_mesh():
             gz = gzip.compress(body)
             return Response(gz, mimetype="application/json", headers={"Content-Encoding": "gzip"})
         return Response(body, mimetype="application/json")
+    except FileNotFoundError as exc:
+        abort(404, description=str(exc))
+    except ValueError as exc:
+        abort(400, description=str(exc))
+
+
+def _load_contour_totals(path: Path) -> Dict[str, Any]:
+    """Lightweight contour summary (Fx/Fy/torque) without loading full mesh."""
+
+    if path.is_dir():
+        mesh_path = (path / DEFAULT_MESH_NAME).resolve()
+    else:
+        mesh_path = path
+    b_path = mesh_path.parent / "B_field.npz"
+    totals: list[dict[str, Any]] = []
+    source = None
+
+    if b_path.exists():
+        with np.load(b_path, allow_pickle=True) as data:
+            if "contour_totals" in data:
+                totals = [_sanitize_obj(dict(entry)) for entry in data["contour_totals"].tolist()]
+                source = b_path.name
+
+    if not totals and mesh_path.exists():
+        with np.load(mesh_path, allow_pickle=True) as data:
+            meta = data.get("meta")
+            if meta is not None:
+                meta_obj = meta.item()
+                contour_meta = meta_obj.get("contours") if isinstance(meta_obj, dict) else None
+                if contour_meta and isinstance(contour_meta, dict):
+                    raw_totals = contour_meta.get("totals")
+                    if isinstance(raw_totals, (list, tuple)):
+                        totals = [_sanitize_obj(dict(entry)) for entry in raw_totals]
+                        source = mesh_path.name
+
+    return {"totals": totals, "source": source}
+
+
+@app.route("/api/mesh/summary")
+def api_mesh_summary():
+    case_name = request.args.get("case")
+    try:
+        path = _resolve_case_path(case_name)
+        payload = _load_contour_totals(path)
+        return jsonify(payload)
     except FileNotFoundError as exc:
         abort(404, description=str(exc))
     except ValueError as exc:
