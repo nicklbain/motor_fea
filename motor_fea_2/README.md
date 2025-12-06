@@ -150,6 +150,16 @@ When a contour is present and you run `solve_B.py` (or click “Run case” in t
 
 You can also import DXF outlines: use the **Import DXF** panel in the builder to upload a file, optionally group shapes by layer, and auto-fit the geometry into your current domain. Closed polylines become explicit polygons, circles stay analytic, and arcs get faceted into segments (a warning is shown if anything is skipped).
 
+### Solving from the Case Builder
+
+The **Run** panel lets you launch meshing + solving without leaving the UI. New toggles include:
+
+- **Skip mesh if unchanged**: reuse the existing `mesh.npz` when the definition matches the saved file (faster re-solves).
+- **Compute indicator**: optionally disable indicator field generation when you only care about the primary B-field.
+- **Use B–H curves**: turn nonlinear steel off for quick linear sanity checks.
+
+Adaptive solves reuse the previous `B_field.npz` to drive point-cloud refinement; both standard and adaptive runs stream stdout/stderr back to the UI and surface per-step timing.
+
 **Usage**
 
 ```bash
@@ -207,6 +217,8 @@ The **Adaptive mesh** mode in the Case Builder now drives the new point-cloud me
 Steel objects can now carry a nonlinear B–H curve. In the Case Builder, either enter `µ_r` plus a saturation `B_sat` to auto-generate a simple knee, or upload a CSV with two columns (comma/space separated) `B_T, H_A_per_m` (header optional, comments starting with `#` are ignored). The mesh stores per-triangle `bh_id` plus the curve in metadata; the solver runs a Picard loop to update `µ_r` from the curve and writes the effective `mu_r_effective` alongside the usual outputs.
 
 Each solve appends a lightweight diagnostics line to `cases/<case>/diagnostics.log` (NDJSON): timestamp, mesh path, node/tri counts, BH settings (method, iterations, convergence, flags), µ ranges, and timing. Use it to trace why a run was slow or which solver path was taken. The file grows over time; delete it if you want a fresh log.
+
+Sample curve libraries live under `BH_curves/` (e.g., NOES_B35A230, mild steel). You can point the Case Builder at those CSVs or drop your own files there for quick reuse across cases.
 
 1. A coarse lattice covers the entire domain using the requested `coarse` spacing (optionally anisotropic via `mesh.y`).
 2. Each focus region (material bounds ± `focus_pad` or manually supplied `focus_boxes`) receives its own fine lattice sampled at `fine` spacing.
